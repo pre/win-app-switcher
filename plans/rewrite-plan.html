@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>win-app-switcher — Rewrite Plan</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #666;
+    --border: #ddd; --accent: #0b57d0; --code-bg: #f4f4f4;
+    --keep: #0a7d33; --drop: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c; --fg: #e6e6e6; --muted: #9aa0a6;
+      --border: #33373d; --accent: #7cacf8; --code-bg: #22252a;
+      --keep: #6dd58c; --drop: #f2867e;
+    }
+  }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 52rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 1.7rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.25rem; margin: 2.2rem 0 .6rem; border-bottom: 1px solid var(--border); padding-bottom: .3rem; }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 .4rem; }
+  .sub { color: var(--muted); margin: 0 0 1.5rem; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .95rem; }
+  th, td { border: 1px solid var(--border); padding: .4rem .6rem; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); }
+  code, pre { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: .9em; }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: .9rem 1rem; border-radius: 8px; overflow-x: auto; line-height: 1.45; }
+  pre code { background: none; padding: 0; }
+  .keep { color: var(--keep); font-weight: 600; }
+  .drop { color: var(--drop); font-weight: 600; }
+  li { margin: .2rem 0; }
+  .note { border-left: 3px solid var(--accent); padding: .5rem .9rem; background: var(--code-bg); border-radius: 0 8px 8px 0; margin: .8rem 0; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>win-app-switcher — Rewrite Plan</h1>
+<p class="sub">macOS-style application switching for Windows, written in Rust.
+Reference implementation: <a href="https://github.com/hdlx/AltAppSwitcher">AltAppSwitcher</a> (C, studied at <code>~/dev/rnd/AltAppSwitcher</code>).</p>
+
+<h2>1. Goal</h2>
+<p>A single small background process that makes the Windows key behave like the macOS Command key
+for application switching. Target audience is the power user: speed, reliability and predictability
+over feature count.</p>
+
+<h2>2. Scope — decisions</h2>
+
+<h3>Kept (from the spec and AltAppSwitcher review)</h3>
+<ul>
+  <li><span class="keep">WIN + TAB</span> — macOS-style app switcher dialog: one icon per running application, horizontal row.</li>
+  <li><span class="keep">WIN + SHIFT + TAB</span> — move selection backwards.</li>
+  <li><span class="keep">WIN + §</span> — window switcher for the active application.
+      Quick tap = instant switch to the next window, <em>no dialog</em>.
+      WIN held = vertical list dialog, one row per window: <em>app name | app icon | window title</em>.
+      § advances, SHIFT + § goes back.</li>
+  <li><span class="keep">Mouse hover selects</span> — hovered icon shows the selection border; releasing WIN activates it. Left click activates immediately; click outside cancels.</li>
+  <li><span class="keep">Arrow keys</span> move the selection (Left/Right in app switcher, Up/Down in window list). No hjkl.</li>
+  <li><span class="keep">ESC</span> cancels the dialog without switching.</li>
+  <li><span class="keep">WIN + Q</span> — close all windows of the selected app (app switcher only). No hover “X” close button.</li>
+  <li><span class="keep">Theme</span> — <code>auto</code> (follow Windows light/dark) / <code>light</code> / <code>dark</code>.</li>
+  <li><span class="keep">Scale</span> — dialog size multiplier from config.</li>
+  <li><span class="keep">Selected app name</span> shown under the selected icon only; other icons bare.</li>
+  <li><span class="keep">Dialog placement</span> — monitor under the mouse cursor, or primary (config).</li>
+  <li><span class="keep">Virtual desktop filter</span> — current desktop only, or all (config).</li>
+  <li><span class="keep">Restore minimized windows</span> on activation (config).</li>
+  <li><span class="keep">Elevated apps</span> — applications running as administrator (e.g. VS Code launched from WSL as superuser) are listed and switchable like any other app. Requires the switcher itself to run elevated (see §4).</li>
+  <li><span class="keep">Single instance</span> — second launch shows a Yes/No dialog: “already running — restart it?”.</li>
+  <li><span class="keep">Tray icon</span> — “§” glyph; right-click menu with <em>Quit</em>.</li>
+  <li><span class="keep">TOML config</span> + fully commented-out <code>config.example.toml</code>.</li>
+</ul>
+
+<h3>Dropped (deliberately)</h3>
+<ul>
+  <li><span class="drop">Updater.exe</span> and <span class="drop">Settings.exe</span> — config file only.</li>
+  <li><span class="drop">Remappable keybindings</span> — WIN+TAB / WIN+§ / SHIFT / Q / arrows / ESC are hardcoded. Small config stays small.</li>
+  <li><span class="drop">Hover “X” close button</span>, <span class="drop">hjkl navigation</span>.</li>
+  <li><span class="drop">App-name labels for all/none</span> (AAS <code>display name</code> modes) — always “selected only”.</li>
+  <li><span class="drop">App filter by mouse monitor</span> (AAS <code>app filter mode</code>) — always list all eligible windows.</li>
+  <li><span class="drop">Gnome/window-per-entry switcher mode</span> (AAS <code>app switcher mode: window</code>).</li>
+  <li><span class="drop">Mouse/keyboard common selection option</span> — mouse and keyboard selections are independent, as in macOS.</li>
+  <li><span class="drop">Update check</span>, <span class="drop">.bat helper scripts</span> — startup via a documented shortcut in <code>shell:startup</code> (README section).</li>
+</ul>
+
+<div class="note">
+Key insight from the reference code: AltAppSwitcher’s “window mode” (alt+~) shows <em>no UI at all</em> —
+it live-switches windows on each key press. Our WIN+§ list dialog is therefore a new design, not a port.
+The quick-tap behavior, however, matches what AAS already proves works.
+</div>
+
+<h2>3. UX specification</h2>
+
+<h3>App switcher (WIN + TAB)</h3>
+<ul>
+  <li>On WIN+TAB the dialog opens immediately, selection starts at the <em>second</em> app
+      (index 1 — pressing and releasing instantly switches to the previous app, macOS behavior).</li>
+  <li>Apps ordered by z-order of their topmost window (most recently used first).</li>
+  <li>Repeated TAB while WIN held advances; SHIFT+TAB / Left / Right move the selection; wrap-around at the ends.</li>
+  <li>Releasing WIN activates the selection (keyboard selection, or hovered icon if the mouse moved last).</li>
+  <li>Rendering: rounded-corner panel, one icon per app group, selection shown as a rounded highlight
+      behind the icon, selected app’s name centered underneath.</li>
+</ul>
+
+<h3>Window switcher (WIN + §)</h3>
+<ul>
+  <li>On § down (WIN held): the next window of the foreground app is selected immediately.
+      If WIN is released before <code>dialog_delay_ms</code> elapses, the switch happens with no UI.</li>
+  <li>If WIN is still held after the delay, the list dialog appears: rows of
+      <em>app name | icon | window title</em>, current selection highlighted.</li>
+  <li>§ moves down, SHIFT+§ moves up, Up/Down arrows likewise; wrap-around; ESC cancels; WIN release activates.</li>
+  <li>Windows ordered by z-order within the app group.</li>
+</ul>
+
+<h3>Key summary</h3>
+<table>
+  <tr><th>Input</th><th>Action</th></tr>
+  <tr><td><code>WIN+TAB</code></td><td>Open app switcher / next app</td></tr>
+  <tr><td><code>WIN+SHIFT+TAB</code></td><td>Previous app</td></tr>
+  <tr><td><code>WIN+§</code> (tap)</td><td>Instant switch to next window of active app, no UI</td></tr>
+  <tr><td><code>WIN+§</code> (WIN held)</td><td>Window list dialog; § = next, SHIFT+§ = previous</td></tr>
+  <tr><td>Arrows</td><td>Move selection (Left/Right or Up/Down per dialog)</td></tr>
+  <tr><td>Mouse hover / click</td><td>Select / activate</td></tr>
+  <tr><td><code>WIN+Q</code></td><td>Close all windows of selected app (app switcher)</td></tr>
+  <tr><td><code>ESC</code></td><td>Cancel</td></tr>
+  <tr><td>Release <code>WIN</code></td><td>Activate selection</td></tr>
+</table>
+
+<div class="note">
+The § key is identified by <strong>scan code 41</strong> (the key left of digit 1: § on Finnish/Swedish
+layouts, ` on US, ² on French…). AltAppSwitcher does the same via its <code>USKeyToLocalKey</code>
+translation. All other keys use virtual-key codes, so the shortcuts work on any layout.
+</div>
+
+<h2>4. Architecture</h2>
+
+<h3>Elevation & priority</h3>
+<ul>
+  <li><strong>The switcher runs elevated (as administrator).</strong> This is a hard requirement, not a preference:
+      UIPI blocks a non-elevated process’s low-level keyboard hook from receiving <em>any</em> input while an
+      elevated window has focus — WIN+TAB would simply not fire inside an elevated VS Code. Elevation is also
+      needed to attach input to and activate elevated windows. Enable <code>SeDebugPrivilege</code> at startup (as AAS does).</li>
+  <li><code>REALTIME_PRIORITY_CLASS</code> for the process, <code>THREAD_PRIORITY_TIME_CRITICAL</code> for the hook
+      thread — switching must be reliably fast even under full CPU load (compiles, games). REALTIME requires
+      elevation (<code>SeIncreaseBasePriorityPrivilege</code>); since we require elevation anyway, it is available.
+      If launched unelevated regardless, Windows silently falls back to HIGH — degraded but functional for
+      non-elevated apps. Safe at REALTIME because every thread is event-driven (blocked in
+      <code>GetMessage</code>); no busy loops anywhere.</li>
+</ul>
+
+<h3>Process & threads</h3>
+<ul>
+  <li><strong>Hook thread</strong>: installs <code>WH_KEYBOARD_LL</code>, decides swallow/pass per event, posts
+      <code>Init/Next/Prev/Deinit</code> messages to the main thread. The callback must stay fast
+      (Windows silently drops slow hooks), so it does nothing but state transitions and <code>PostThreadMessage</code>.</li>
+  <li><strong>Main thread</strong>: message loop owning the tray icon, config, and the dialog windows.</li>
+</ul>
+
+<h3>WIN key handling (the hard part)</h3>
+<ul>
+  <li>Swallow WIN+TAB, WIN+§ and WIN+Q in the hook; pass every other WIN combo through so
+      <code>WIN+L</code>, <code>WIN+D</code> etc. keep working.</li>
+  <li>Once a switcher session starts, the bare WIN release must not open the Start menu.
+      Standard trick (AAS does a variant of this): inject a no-op key event (e.g. <code>VK_NONAME</code> or
+      right-ctrl down/up) before the WIN up passes through, so Windows sees WIN as a combo, not a tap.</li>
+  <li>Ignore injected events (<code>LLKHF_INJECTED</code>) to avoid feedback loops.</li>
+  <li>On session end, verify no key is left logically stuck (AAS’s <code>RestoreKey</code> exists because
+      this genuinely happens; we replicate the check with <code>GetAsyncKeyState</code> + corrective
+      <code>SendInput</code>).</li>
+</ul>
+
+<h3>Window enumeration & grouping</h3>
+<ul>
+  <li><code>EnumWindows</code> + eligibility filter, ported from AAS <code>IsEligibleWindow</code>:
+      visible; not <code>WS_EX_TOOLWINDOW</code>; not topmost-without-appwindow; not owned (unless
+      <code>WS_EX_APPWINDOW</code>); class-name blocklist (<code>Shell_TrayWnd</code>, <code>Windows.UI.Core.CoreWindow</code>, …);
+      not DWM-cloaked; optionally on the current virtual desktop (<code>IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop</code>).</li>
+  <li>Group windows by resolved process executable path — via <code>OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)</code>
+      + <code>QueryFullProcessImageName</code>, which works across integrity levels (elevated targets included).
+      UWP special case: for <code>ApplicationFrameWindow</code> hosts, resolve the real child PID (port AAS <code>FindActualPID</code>).</li>
+  <li>Activation: <code>AttachThreadInput</code> to the foreground thread + <code>SetForegroundWindow</code>,
+      restore from minimized per config (port AAS’s proven sequence, including the hung-foreground
+      timeout guard in <code>TryAttachToForeground</code>).</li>
+</ul>
+
+<h3>Icons</h3>
+<ul>
+  <li>Win32 apps: <code>SHGetFileInfo</code> / <code>IShellItemImageFactory</code> on the exe path → large icon.</li>
+  <li>UWP apps: <code>IShellItemImageFactory</code> on <code>shell:AppsFolder\&lt;AUMID&gt;</code> — one code path,
+      replaces AltAppSwitcher’s ~300 lines of appx-manifest parsing.</li>
+  <li>Cache icons per exe path for the lifetime of the process.</li>
+</ul>
+
+<h3>Rendering</h3>
+<ul>
+  <li>Direct2D + DirectWrite through the <code>windows</code> crate (no extra dependencies): rounded corners,
+      alpha, crisp text, per-monitor DPI. Layered topmost popup window (<code>WS_EX_TOPMOST | WS_EX_TOOLWINDOW</code>).</li>
+  <li>Both dialogs share one window class and renderer; layout differs (horizontal icon row vs. vertical list).</li>
+  <li>Theme: <code>auto</code> reads <code>AppsUseLightTheme</code> from the registry; colors are two small palettes.</li>
+</ul>
+
+<h3>Tray & single instance</h3>
+<ul>
+  <li><code>Shell_NotifyIcon</code>; icon is a “§” glyph embedded as <code>.ico</code> resource. Right-click → menu → Quit.</li>
+  <li>Named mutex <code>Global\win-app-switcher-single-instance</code>. If already held: <code>MessageBox</code>
+      Yes/No → on Yes, broadcast a registered window message telling the old instance to exit, wait for
+      the mutex, continue; on No, exit.</li>
+</ul>
+
+<h2>5. Configuration</h2>
+<p><code>config.toml</code> lives next to the exe. Missing file or missing keys → defaults below.
+<code>config.example.toml</code> ships with every line commented out:</p>
+
+<pre><code># win-app-switcher configuration.
+# Copy to config.toml next to the exe and uncomment what you want to change.
+# Missing keys fall back to the defaults shown here.
+
+# Dialog theme: "auto" follows Windows light/dark mode. ("auto" | "light" | "dark")
+#theme = "auto"
+
+# Dialog size multiplier.
+#scale = 1.0
+
+# Show the selected application's name under its icon.
+#show_selected_name = true
+
+# Which windows to list: only the current virtual desktop, or all. ("current" | "all")
+#desktop_filter = "current"
+
+# Restore minimized windows when activated.
+#restore_minimized = true
+
+# Which monitor the dialog opens on. ("mouse" | "primary")
+#dialog_monitor = "mouse"
+
+# WIN+§ shows the window list only after this delay (ms).
+# A quicker tap switches windows with no UI.
+#dialog_delay_ms = 150
+</code></pre>
+
+<h2>6. Crates & repo layout</h2>
+<ul>
+  <li><code>windows</code> — all Win32/COM APIs (hook, D2D, DWrite, shell, tray, virtual desktops).</li>
+  <li><code>serde</code> + <code>toml</code> — config.</li>
+  <li><code>anyhow</code> — error plumbing at startup; hot paths don’t allocate errors.</li>
+  <li>Nothing else. No GUI framework, no async runtime.</li>
+</ul>
+
+<pre><code>src/
+  main.rs      // startup, single instance, tray, main message loop
+  hook.rs      // WH_KEYBOARD_LL state machine, WIN suppression
+  apps.rs      // enumeration, eligibility, grouping, icons, activation
+  ui.rs        // both dialogs: layout + Direct2D rendering, mouse/key input
+  config.rs    // TOML load + defaults
+config.example.toml
+plans/rewrite-plan.html   // this document
+</code></pre>
+
+<h2>7. Milestones</h2>
+<table>
+  <tr><th>#</th><th>Milestone</th><th>Done when</th></tr>
+  <tr><td>M0</td><td>Skeleton</td><td>Tray icon with Quit, single-instance dialog, config + example file load. Builds for <code>x86_64-pc-windows-msvc</code>.</td></tr>
+  <tr><td>M1</td><td>Hook</td><td>WIN+TAB / WIN+§ swallowed, Start menu never flashes, WIN+L etc. unaffected, no stuck keys.</td></tr>
+  <tr><td>M2</td><td>Core switching</td><td>Enumeration, grouping, activation work — WIN+§ quick-tap window switch usable with no UI at all.</td></tr>
+  <tr><td>M3</td><td>App switcher UI</td><td>WIN+TAB dialog: icons, selection, name label, wrap-around, mouse hover/click, WIN+Q, ESC.</td></tr>
+  <tr><td>M4</td><td>Window switcher UI</td><td>WIN+§ held shows the list dialog; delay logic correct.</td></tr>
+  <tr><td>M5</td><td>Polish</td><td>Theme auto/light/dark, scale, multi-monitor placement, desktop filter, UWP icons verified. README: startup as a Task Scheduler logon task with “Run with highest privileges” — elevated autostart without a UAC prompt at every login.</td></tr>
+</table>
+<p>Each milestone is verified manually on a real Windows machine — this is an input-hook program;
+automated tests cover only pure logic (config parsing, grouping, selection arithmetic).</p>
+
+<h2>8. Risks</h2>
+<table>
+  <tr><th>Risk</th><th>Mitigation</th></tr>
+  <tr><td>Start-menu flash on WIN release</td><td>Dummy-key injection before passing WIN up; proven by AAS and PowerToys.</td></tr>
+  <tr><td>Stuck modifier keys after switch</td><td>Post-session <code>GetAsyncKeyState</code> sweep + corrective <code>SendInput</code> (port of AAS <code>RestoreKey</code>).</td></tr>
+  <tr><td><code>SetForegroundWindow</code> refusals</td><td><code>AttachThreadInput</code> dance + <code>AllowSetForegroundWindow</code>; hung-window timeout guard.</td></tr>
+  <tr><td>Runs unelevated (user skips admin)</td><td>Priority silently degrades to HIGH and elevated apps become invisible to the hook while focused. Detect at startup (<code>TokenElevation</code>) and warn once via a balloon notification; document the Task Scheduler setup as the fix.</td></tr>
+  <tr><td>REALTIME starves the system</td><td>Only possible with a runaway loop — all threads block on <code>GetMessage</code>/events by design. Code review gate: no polling loops.</td></tr>
+  <tr><td>UWP icon edge cases</td><td><code>shell:AppsFolder</code> path is the OS’s own resolver; fall back to a generic icon.</td></tr>
+  <tr><td>Antivirus false positives (LL hook)</td><td>Known issue for AAS too; document it. No code mitigation planned.</td></tr>
+  <tr><td>Development happens on macOS</td><td>Cross-compile with <code>cargo-xwin</code> (msvc target); functional testing on a Windows box/VM per milestone.</td></tr>
+</table>
+
+</main>
+</body>
+</html>

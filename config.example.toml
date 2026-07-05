@@ -1,0 +1,25 @@
+# win-app-switcher configuration.
+# Copy to config.toml next to the exe and uncomment what you want to change.
+# Missing keys fall back to the defaults shown here.
+
+# Dialog theme: "auto" follows Windows light/dark mode. ("auto" | "light" | "dark")
+#theme = "auto"
+
+# Dialog size multiplier.
+#scale = 1.0
+
+# Show the selected application's name under its icon.
+#show_selected_name = true
+
+# Which windows to list: only the current virtual desktop, or all. ("current" | "all")
+#desktop_filter = "current"
+
+# Restore minimized windows when activated.
+#restore_minimized = true
+
+# Which monitor the dialog opens on. ("mouse" | "primary")
+#dialog_monitor = "mouse"
+
+# WIN+§ shows the window list only after this delay (ms).
+# A quicker tap switches windows with no UI.
+#dialog_delay_ms = 150
