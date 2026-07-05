@@ -55,7 +55,8 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetForegroundWindow, GetParent,
-        GetShellWindow, GetWindow, GetWindowLongW, GetWindowThreadProcessId, IsIconic,
+        GetShellWindow, GetWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId,
+        IsIconic,
         IsWindowVisible, SendMessageTimeoutW, SetForegroundWindow, ShowWindowAsync, GWL_EXSTYLE,
         GW_OWNER, SMTO_ABORTIFHUNG, SW_RESTORE, WINDOW_EX_STYLE, WM_NULL, WS_EX_APPWINDOW,
         WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -112,7 +113,7 @@ mod win {
 
     /// FileDescription from the exe's version resource ("Visual Studio Code"),
     /// falling back to the file stem ("Code").
-    fn display_name(exe: &str) -> String {
+    pub fn display_name(exe: &str) -> String {
         unsafe { file_description(exe) }.unwrap_or_else(|| {
             std::path::Path::new(exe)
                 .file_stem()
@@ -217,28 +218,38 @@ mod win {
         (lines != 0).then_some(bits)
     }
 
-    /// All windows of the foreground app in z-order (foreground first).
-    /// With `include_minimized` off, minimized windows are skipped — without
-    /// restore-on-activate a minimized window cannot visibly take focus.
-    pub fn foreground_app_windows(include_minimized: bool) -> Vec<HWND> {
+    /// The foreground app's exe path and all its windows in z-order
+    /// (foreground first). With `include_minimized` off, minimized windows
+    /// are skipped — without restore-on-activate a minimized window cannot
+    /// visibly take focus.
+    pub fn foreground_app_windows(include_minimized: bool) -> (String, Vec<HWND>) {
         unsafe {
             // The foreground window itself may be ineligible (e.g. a child
             // dialog); walk up until an eligible window names the app.
             let mut fg = GetForegroundWindow();
             let exe = loop {
                 if fg.0.is_null() {
-                    return Vec::new();
+                    return (String::new(), Vec::new());
                 }
                 if let Some(exe) = eligible_exe(fg) {
                     break exe;
                 }
                 fg = GetParent(fg).unwrap_or_default();
             };
-            eligible_windows()
+            let windows = eligible_windows()
                 .into_iter()
                 .filter(|(w, e)| *e == exe && (include_minimized || !IsIconic(*w).as_bool()))
                 .map(|(w, _)| w)
-                .collect()
+                .collect();
+            (exe, windows)
+        }
+    }
+
+    pub fn window_title(hwnd: HWND) -> String {
+        unsafe {
+            let mut buf = [0u16; 256];
+            let n = GetWindowTextW(hwnd, &mut buf) as usize;
+            String::from_utf16_lossy(&buf[..n])
         }
     }
 

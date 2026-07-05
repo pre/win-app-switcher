@@ -55,11 +55,12 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, ChangeWindowMessageFilterEx, CreateIconIndirect, CreatePopupMenu,
         CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-        GetCursorPos, GetMessageW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
-        RegisterWindowMessageW, SetForegroundWindow, TrackPopupMenu, TranslateMessage, HICON,
-        HWND_BROADCAST, ICONINFO, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_ICONWARNING, MB_OK,
-        MB_YESNO, MF_STRING, MSG, MSGFLT_ALLOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-        WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_RBUTTONUP, WNDCLASSW,
+        GetCursorPos, GetMessageW, KillTimer, MessageBoxW, PostMessageW, PostQuitMessage,
+        RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, TrackPopupMenu,
+        TranslateMessage, HICON, HWND_BROADCAST, ICONINFO, IDYES, MB_ICONERROR, MB_ICONQUESTION,
+        MB_ICONWARNING, MB_OK, MB_YESNO, MF_STRING, MSG, MSGFLT_ALLOW, TPM_NONOTIFY,
+        TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE,
+        WM_DESTROY, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
     };
 
     const CLASS_NAME: PCWSTR = w!("win-app-switcher.main");
@@ -67,6 +68,8 @@ mod win {
     const WM_TRAY: u32 = WM_APP + 1;
     const TRAY_ID: u32 = 1;
     const CMD_QUIT: usize = 1;
+    /// Timer that opens the WIN+§ list dialog after `dialog_delay_ms`.
+    const TIMER_WINLIST: usize = 1;
 
     /// Broadcast "please exit" message id, registered before the window exists.
     static EXIT_MSG: AtomicU32 = AtomicU32::new(0);
@@ -81,9 +84,13 @@ mod win {
             groups: Vec<crate::apps::AppGroup>,
             kb: usize,
         },
-        /// WIN+§: the foreground app's windows, cycled with no UI (M4 adds
-        /// the delayed list dialog).
-        Win { windows: Vec<HWND>, index: usize },
+        /// WIN+§: the foreground app's windows. A quick tap switches with no
+        /// UI; the list dialog appears if WIN is held past `dialog_delay_ms`.
+        Win {
+            exe: String,
+            windows: Vec<HWND>,
+            index: usize,
+        },
     }
 
     thread_local! {
@@ -236,6 +243,11 @@ mod win {
                 }
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == TIMER_WINLIST => {
+                let _ = KillTimer(Some(hwnd), TIMER_WINLIST);
+                show_window_list(hwnd);
+                LRESULT(0)
+            }
             WM_DESTROY => {
                 let nid = NOTIFYICONDATAW {
                     cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -266,6 +278,15 @@ mod win {
         SESSION.with_borrow_mut(|slot| match ev {
             AppNext | AppPrev => {
                 let forward = ev == AppNext;
+                // TAB mid WIN+§ session switches to the app switcher: the
+                // win session is discarded, nothing activated.
+                if matches!(slot, Some(Session::Win { .. })) {
+                    unsafe {
+                        let _ = KillTimer(Some(main_hwnd), TIMER_WINLIST);
+                    }
+                    *slot = None;
+                    crate::ui::close();
+                }
                 match slot {
                     None => {
                         let groups = crate::apps::app_groups();
@@ -284,47 +305,68 @@ mod win {
                         *kb = crate::apps::step_index(groups.len(), *kb, forward);
                         crate::ui::kb_select(*kb);
                     }
-                    // Hook swallows TAB during a WIN+§ session; can't happen.
-                    Some(Session::Win { .. }) => {}
+                    Some(Session::Win { .. }) => unreachable!("discarded above"),
                 }
             }
             WinNext | WinPrev => {
                 if slot.is_none() {
-                    let windows = crate::apps::foreground_app_windows(cfg.restore_minimized);
+                    let (exe, windows) =
+                        crate::apps::foreground_app_windows(cfg.restore_minimized);
                     #[cfg(debug_assertions)]
                     println!("win session: {} candidates", windows.len());
-                    *slot = Some(Session::Win { windows, index: 0 });
+                    // The list dialog appears only if WIN is still held after
+                    // the delay — a quick tap switches with no UI.
+                    unsafe {
+                        SetTimer(Some(main_hwnd), TIMER_WINLIST, cfg.dialog_delay_ms, None);
+                    }
+                    *slot = Some(Session::Win { exe, windows, index: 0 });
                 }
-                if let Some(Session::Win { windows, index }) = slot {
+                if let Some(Session::Win { windows, index, .. }) = slot {
                     *index =
                         crate::apps::step_index(windows.len(), *index, matches!(ev, WinNext));
+                    // The dialog follows once open; a no-op before that.
+                    crate::ui::kb_select(*index);
                 }
             }
-            Commit => match slot.take() {
-                Some(Session::App { groups, .. }) => {
-                    let sel = crate::ui::selection();
-                    if let Some(group) = groups.get(sel) {
-                        #[cfg(debug_assertions)]
-                        println!("activate app {}/{} ({})", sel + 1, groups.len(), group.name);
-                        // Activate first: the dialog holds the foreground, so
-                        // SetForegroundWindow from here is trivially allowed.
-                        crate::apps::activate(group.windows[0], cfg.restore_minimized);
-                    }
-                    crate::ui::close();
+            Commit => {
+                unsafe {
+                    let _ = KillTimer(Some(main_hwnd), TIMER_WINLIST);
                 }
-                Some(Session::Win { windows, index }) => {
-                    if let Some(&hwnd) = windows.get(index) {
-                        #[cfg(debug_assertions)]
-                        println!("activate window {}/{} ({hwnd:?})", index + 1, windows.len());
-                        crate::apps::activate(hwnd, cfg.restore_minimized);
+                match slot.take() {
+                    Some(Session::App { groups, .. }) => {
+                        let sel = crate::ui::selection();
+                        if let Some(group) = groups.get(sel) {
+                            #[cfg(debug_assertions)]
+                            println!("activate app {}/{} ({})", sel + 1, groups.len(), group.name);
+                            // Activate first: the dialog holds the foreground,
+                            // so SetForegroundWindow here is trivially allowed.
+                            crate::apps::activate(group.windows[0], cfg.restore_minimized);
+                        }
+                        crate::ui::close();
                     }
+                    Some(Session::Win { windows, index, .. }) => {
+                        // The mouse may have picked a row in the list dialog.
+                        let sel = if crate::ui::is_open() {
+                            crate::ui::selection()
+                        } else {
+                            index
+                        };
+                        if let Some(&hwnd) = windows.get(sel) {
+                            #[cfg(debug_assertions)]
+                            println!("activate window {}/{} ({hwnd:?})", sel + 1, windows.len());
+                            crate::apps::activate(hwnd, cfg.restore_minimized);
+                        }
+                        crate::ui::close();
+                    }
+                    None => {}
                 }
-                None => {}
-            },
+            }
             Cancel => {
-                if let Some(Session::App { .. }) = slot.take() {
-                    crate::ui::close();
+                unsafe {
+                    let _ = KillTimer(Some(main_hwnd), TIMER_WINLIST);
                 }
+                slot.take();
+                crate::ui::close();
             }
             // WIN+Q: close every window of the selected app, drop its icon
             // from the row, keep the session going (macOS Cmd+Q behavior).
@@ -344,6 +386,22 @@ mod win {
                         crate::ui::show(main_hwnd, groups, *kb, &cfg);
                     }
                 }
+            }
+        });
+    }
+
+    /// `dialog_delay_ms` elapsed with WIN still held: open the window list.
+    fn show_window_list(main_hwnd: HWND) {
+        let cfg = CONFIG.get().cloned().unwrap_or_default();
+        SESSION.with_borrow(|slot| {
+            if let Some(Session::Win { exe, windows, index }) = slot {
+                if windows.is_empty() {
+                    return;
+                }
+                let name = crate::apps::display_name(exe);
+                let titles: Vec<String> =
+                    windows.iter().map(|&w| crate::apps::window_title(w)).collect();
+                crate::ui::show_list(main_hwnd, &name, exe, &titles, *index, &cfg);
             }
         });
     }

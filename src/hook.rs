@@ -5,8 +5,8 @@
 //!
 //! Key facts the logic encodes:
 //! - WIN down/up always PASS through, so WIN+L, WIN+D … keep working and the
-//!   OS never sees WIN stuck down. Only TAB / § / Q / ESC are swallowed, and
-//!   only during a switcher session.
+//!   OS never sees WIN stuck down. Only TAB / § / Q / ESC / arrows are
+//!   swallowed, and only during a switcher session.
 //! - On session start a dummy key (VK 0xFF, unassigned) is injected while WIN
 //!   is still down, so Windows sees WIN as a combo, not a tap: the Start menu
 //!   never opens on release. Same trick as AltAppSwitcher/PowerToys.
@@ -32,6 +32,8 @@ pub enum Key {
     Q,
     Left,
     Right,
+    Up,
+    Down,
 }
 
 /// Posted to the main thread as the wparam of [`WM_SWITCHER`].
@@ -94,16 +96,13 @@ pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
             Actions { event, ..PASS }
         }
         (Key::Tab, false) if s.win_down => {
+            // TAB always means the app switcher: it starts a session, and
+            // mid WIN+§ session it switches over (win session discarded).
             let inject_dummy = s.mode == Mode::None;
-            if s.mode == Mode::None {
-                s.mode = Mode::App;
-            }
-            // Tab during a WIN+§ session: swallowed, ignored.
-            let event = (s.mode == Mode::App)
-                .then(|| if shift { Event::AppPrev } else { Event::AppNext });
+            s.mode = Mode::App;
             Actions {
                 swallow: true,
-                event,
+                event: Some(if shift { Event::AppPrev } else { Event::AppNext }),
                 inject_dummy,
             }
         }
@@ -138,8 +137,9 @@ pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
             event: (!up && s.mode == Mode::App).then_some(Event::CloseApp),
             inject_dummy: false,
         },
-        // Arrows move the app-switcher selection; outside a session they pass
-        // through so WIN+Left/Right window snapping keeps working.
+        // Arrows move the selection (Left/Right in the app switcher, Up/Down
+        // in the window list); outside a session they pass through so
+        // WIN+arrow window snapping keeps working.
         (Key::Left | Key::Right, up) if s.mode == Mode::App => Actions {
             swallow: true,
             event: (!up).then(|| {
@@ -147,6 +147,17 @@ pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
                     Event::AppPrev
                 } else {
                     Event::AppNext
+                }
+            }),
+            inject_dummy: false,
+        },
+        (Key::Up | Key::Down, up) if s.mode == Mode::Win => Actions {
+            swallow: true,
+            event: (!up).then(|| {
+                if key == Key::Up {
+                    Event::WinPrev
+                } else {
+                    Event::WinNext
                 }
             }),
             inject_dummy: false,
@@ -169,8 +180,8 @@ mod win {
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_Q,
-        VK_RIGHT, VK_RWIN, VK_SHIFT, VK_TAB,
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN,
+        VK_Q, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_TAB, VK_UP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetMessageW, PostMessageW, SetWindowsHookExW, HC_ACTION, KBDLLHOOKSTRUCT,
@@ -213,6 +224,8 @@ mod win {
             VK_Q => Some(Key::Q),
             VK_LEFT => Some(Key::Left),
             VK_RIGHT => Some(Key::Right),
+            VK_UP => Some(Key::Up),
+            VK_DOWN => Some(Key::Down),
             _ => None,
         }
     }
@@ -321,10 +334,12 @@ mod tests {
         assert_eq!(a.event, Some(Event::WinNext));
         let a = step(&mut s, Key::Section, false, true);
         assert_eq!(a.event, Some(Event::WinPrev));
-        // Tab during a window session is swallowed but does nothing.
+        // Tab during a window session switches over to the app switcher.
         let a = step(&mut s, Key::Tab, false, false);
-        assert!(a.swallow && a.event.is_none());
-        assert_eq!(s.mode, Mode::Win);
+        assert!(a.swallow);
+        assert_eq!(a.event, Some(Event::AppNext));
+        assert!(!a.inject_dummy, "dummy key already injected by this session");
+        assert_eq!(s.mode, Mode::App);
     }
 
     #[test]
@@ -343,16 +358,33 @@ mod tests {
         assert!(a.swallow && a.event.is_none(), "arrow key-up swallowed silently");
         step(&mut s, Key::Win, true, false);
 
-        // Window mode (M3): arrows pass through untouched.
+        // Window mode: Left/Right pass through, Up/Down move the selection.
         step(&mut s, Key::Win, false, false);
         step(&mut s, Key::Section, false, false);
         assert!(!step(&mut s, Key::Right, false, false).swallow);
+        let a = step(&mut s, Key::Down, false, false);
+        assert!(a.swallow);
+        assert_eq!(a.event, Some(Event::WinNext));
+        let a = step(&mut s, Key::Up, false, false);
+        assert_eq!(a.event, Some(Event::WinPrev));
+        // ...and Up/Down pass through in app mode (WIN+Up maximize works).
+        step(&mut s, Key::Tab, false, false);
+        assert!(!step(&mut s, Key::Up, false, false).swallow);
     }
 
     #[test]
     fn keys_without_win_pass_through() {
         let mut s = IDLE;
-        for key in [Key::Tab, Key::Section, Key::Esc, Key::Q, Key::Left, Key::Right] {
+        for key in [
+            Key::Tab,
+            Key::Section,
+            Key::Esc,
+            Key::Q,
+            Key::Left,
+            Key::Right,
+            Key::Up,
+            Key::Down,
+        ] {
             let a = step(&mut s, key, false, false);
             assert!(!a.swallow && a.event.is_none());
             assert_eq!(s.mode, Mode::None);

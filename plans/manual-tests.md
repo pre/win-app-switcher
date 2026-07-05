@@ -54,7 +54,8 @@ Repeat the key tests with the release build to confirm it behaves the same
 5. During a session (WIN held after TAB), press ESC → `Cancel`; releasing WIN
    afterwards prints nothing and Start menu stays closed.
 6. During a WIN+TAB session, press Q → `CloseApp`; Windows Search does not open.
-7. During a WIN+§ session, press TAB → swallowed, no event, no Task View.
+7. During a WIN+§ session, press TAB → `AppNext`, no Task View (the session
+   switches over to the app switcher).
 
 ### Pass-through unaffected
 8. WIN alone (tap) → Start menu opens normally.
@@ -151,6 +152,26 @@ Next/Prev event and `activate candidate i/N` on commit.
 18. `dialog_monitor = "primary"` → dialog always opens on the primary
     monitor regardless of the mouse.
 
-## M4 — Window switcher UI (later)
-## M4 — Window switcher UI (later)
+## M4 — Window switcher UI
+
+1. Focus an app with 3+ windows. WIN+§, keep WIN held: after ~150 ms a
+   vertical list appears, one row per window: app name | icon | window
+   title. The second row is highlighted (the first § already stepped).
+2. Quick WIN+§ tap (release before the delay) → window switches with **no**
+   dialog, as in M2.
+3. § steps down, SHIFT+§ up, Down/Up arrows likewise; wrap-around at both
+   ends; releasing WIN activates the highlighted row.
+4. ESC closes the list, focus stays where it was.
+5. Mouse: hover highlights a row, releasing WIN activates it; left click
+   activates immediately; click outside cancels.
+6. TAB while the list is open (WIN held) → the list closes and the app
+   switcher dialog opens (win session discarded, nothing activated).
+   Same works before the delay: WIN+§ quickly followed by TAB.
+7. `dialog_delay_ms = 1000` → the list appears only after one second;
+   `dialog_delay_ms = 0` → practically immediately.
+8. Single-window app: quick tap leaves focus in place; holding WIN shows a
+   one-row list.
+9. Left/Right arrows during the list pass through (WIN+Left snap fires);
+   Up/Down during the app switcher pass through (WIN+Up maximize fires).
+
 ## M5 — Polish (later)

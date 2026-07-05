@@ -1,4 +1,4 @@
-//! App switcher dialog (M3): WIN+TAB icon row.
+//! Switcher dialogs: WIN+TAB icon row (M3) and WIN+§ window list (M4).
 //!
 //! Layout arithmetic is pure and unit-tested on any host; the Windows glue
 //! below renders it with Direct2D + DirectWrite and feeds mouse input back
@@ -7,13 +7,21 @@
 //! The window recipe is AltAppSwitcher's proven one: WS_POPUP topmost tool
 //! window, made foreground, mouse captured with SetCapture so a click
 //! outside the panel is seen (and cancels), Win11 rounded corners via
-//! DwmSetWindowAttribute.
+//! DwmSetWindowAttribute. Both dialogs share the window class, renderer and
+//! input path; only the layout differs.
 
-/// Unscaled layout constants, in pixels.
+/// Unscaled layout constants, in pixels. Icon row:
 const ICON: f32 = 64.0;
 const CELL: f32 = 84.0; // icon cell = selection square
 const PAD: f32 = 16.0; // panel padding around the row
 const LABEL_H: f32 = 30.0; // name strip under the icons
+
+/// Window list:
+const ROW_H: f32 = 44.0;
+const LIST_W: f32 = 560.0;
+const LIST_PAD: f32 = 12.0; // panel padding and selection inset
+const NAME_W: f32 = 150.0; // app-name column
+const LIST_ICON: f32 = 28.0;
 
 #[derive(Clone, Copy)]
 pub struct Layout {
@@ -52,27 +60,94 @@ impl Layout {
         [l + inset, t + inset, r - inset, b - inset]
     }
 
-    /// Name label rect: centered under cell `i`, clamped to the panel.
+    /// Name label rect, symmetric around cell `i`'s center so the text sits
+    /// exactly under the icon; edge overflow is clipped by the render target.
     pub fn label(&self, i: usize) -> [f32; 4] {
         let s = self.scale;
-        let (w, h) = self.size();
         let [l, t, ..] = self.cell(i);
         let center = l + CELL / 2.0 * s;
         let half = 1.5 * CELL * s;
         let top = t + CELL * s;
-        [
-            (center - half).max(0.0),
-            top,
-            (center + half).min(w as f32),
-            (h as f32).min(top + self.label_h() * s),
-        ]
+        [center - half, top, center + half, top + self.label_h() * s]
     }
 
-    /// Icon index for a mouse position, clamped to the row (AAS behavior:
-    /// anywhere inside the panel selects the nearest icon).
+    /// Icon index for a mouse x, clamped to the row (AAS behavior: anywhere
+    /// inside the panel selects the nearest icon).
     pub fn hover(&self, x: i32) -> usize {
         let cell = ((x as f32 / self.scale - PAD) / CELL).floor();
         (cell.max(0.0) as usize).min(self.n.saturating_sub(1))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ListLayout {
+    pub n: usize,
+    pub scale: f32,
+}
+
+impl ListLayout {
+    pub fn size(&self) -> (i32, i32) {
+        let w = LIST_W * self.scale;
+        let h = (2.0 * LIST_PAD + self.n as f32 * ROW_H) * self.scale;
+        (w.round() as i32, h.round() as i32)
+    }
+
+    /// Selection rect of row `i`.
+    pub fn row(&self, i: usize) -> [f32; 4] {
+        let s = self.scale;
+        let top = (LIST_PAD + i as f32 * ROW_H) * s;
+        [LIST_PAD * s, top, (LIST_W - LIST_PAD) * s, top + ROW_H * s]
+    }
+
+    /// Row internals: app name | icon | window title.
+    pub fn name(&self, i: usize) -> [f32; 4] {
+        let s = self.scale;
+        let [_, t, _, b] = self.row(i);
+        [2.0 * LIST_PAD * s, t, (2.0 * LIST_PAD + NAME_W) * s, b]
+    }
+
+    pub fn icon(&self, i: usize) -> [f32; 4] {
+        let s = self.scale;
+        let [_, t, _, b] = self.row(i);
+        let x = (2.0 * LIST_PAD + NAME_W + 8.0) * s;
+        let inset = (ROW_H - LIST_ICON) / 2.0 * s;
+        [x, t + inset, x + LIST_ICON * s, b - inset]
+    }
+
+    pub fn title(&self, i: usize) -> [f32; 4] {
+        let s = self.scale;
+        let [_, t, r, b] = self.row(i);
+        let x = (2.0 * LIST_PAD + NAME_W + 8.0 + LIST_ICON + 12.0) * s;
+        [x, t, r - LIST_PAD * s, b]
+    }
+
+    /// Row index for a mouse y, clamped to the list.
+    pub fn hover(&self, y: i32) -> usize {
+        let row = ((y as f32 / self.scale - LIST_PAD) / ROW_H).floor();
+        (row.max(0.0) as usize).min(self.n.saturating_sub(1))
+    }
+}
+
+/// The two dialog shapes behind one window and renderer.
+#[derive(Clone, Copy)]
+pub enum Panel {
+    Row(Layout),
+    List(ListLayout),
+}
+
+impl Panel {
+    pub fn size(&self) -> (i32, i32) {
+        match self {
+            Panel::Row(l) => l.size(),
+            Panel::List(l) => l.size(),
+        }
+    }
+
+    pub fn hover(&self, x: i32, y: i32) -> usize {
+        match self {
+            Panel::Row(l) => l.hover(x),
+            Panel::List(l) => l.hover(y),
+        }
     }
 
     pub fn inside(&self, x: i32, y: i32) -> bool {
@@ -82,11 +157,11 @@ impl Layout {
 }
 
 #[cfg(windows)]
-pub use win::{close, kb_select, selection, show};
+pub use win::{close, is_open, kb_select, selection, show, show_list};
 
 #[cfg(windows)]
 mod win {
-    use super::Layout;
+    use super::{Layout, ListLayout, Panel};
     use crate::config::{Config, DialogMonitor};
     use std::cell::RefCell;
     use std::sync::Once;
@@ -107,7 +182,7 @@ mod win {
         DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-        DWRITE_WORD_WRAPPING_NO_WRAP,
+        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
     };
     use windows::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -131,16 +206,22 @@ mod win {
     const HILITE: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 };
     const PLACEHOLDER: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 };
     const TEXT: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.9 };
+    const DIM: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.6 };
 
     const DLG_CLASS: windows::core::PCWSTR = w!("win-app-switcher.dialog");
+
+    struct Entry {
+        name: Vec<u16>,
+        title: Vec<u16>, // empty in the icon row
+        icon: Option<Vec<u8>>,
+    }
 
     struct Dlg {
         hwnd: HWND,
         main_hwnd: HWND,
-        names: Vec<Vec<u16>>,
-        icons: Vec<Option<Vec<u8>>>,
+        entries: Vec<Entry>,
         icon_px: u32,
-        layout: Layout,
+        panel: Panel,
         kb: usize,
         hover: usize,
         mouse_last: bool,
@@ -160,28 +241,70 @@ mod win {
         static DLG: RefCell<Option<Dlg>> = const { RefCell::new(None) };
     }
 
-    /// Open the dialog, or refresh contents in place if it is already open
-    /// (WIN+Q removes an app group). `kb` is the keyboard selection.
+    /// Icons are extracted once at ICON size and drawn scaled; one cache
+    /// entry per exe serves both dialogs.
+    fn icon_px(cfg: &Config) -> u32 {
+        (super::ICON * cfg.scale) as u32
+    }
+
+    /// App switcher: one icon per app group.
     pub fn show(main_hwnd: HWND, groups: &[crate::apps::AppGroup], kb: usize, cfg: &Config) {
-        let layout = Layout {
+        let px = icon_px(cfg);
+        let entries = groups
+            .iter()
+            .map(|g| Entry {
+                name: g.name.encode_utf16().collect(),
+                title: Vec::new(),
+                icon: crate::apps::icon_bgra(&g.exe, px),
+            })
+            .collect();
+        let panel = Panel::Row(Layout {
             n: groups.len(),
             scale: cfg.scale,
             show_name: cfg.show_selected_name,
-        };
-        let icon_px = (super::ICON * cfg.scale) as u32;
-        let names = groups.iter().map(|g| g.name.encode_utf16().collect()).collect();
-        let icons = groups.iter().map(|g| crate::apps::icon_bgra(&g.exe, icon_px)).collect();
-        let (w, h) = layout.size();
+        });
+        open(main_hwnd, entries, panel, kb, px, cfg);
+    }
+
+    /// Window switcher: one row per window of the foreground app.
+    pub fn show_list(
+        main_hwnd: HWND,
+        name: &str,
+        exe: &str,
+        titles: &[String],
+        kb: usize,
+        cfg: &Config,
+    ) {
+        let px = icon_px(cfg);
+        let icon = crate::apps::icon_bgra(exe, px);
+        let entries = titles
+            .iter()
+            .map(|t| Entry {
+                name: name.encode_utf16().collect(),
+                title: t.encode_utf16().collect(),
+                icon: icon.clone(),
+            })
+            .collect();
+        let panel = Panel::List(ListLayout {
+            n: titles.len(),
+            scale: cfg.scale,
+        });
+        open(main_hwnd, entries, panel, kb, px, cfg);
+    }
+
+    /// Open the dialog, or refresh contents and size in place if it is
+    /// already open (WIN+Q removes an app group).
+    fn open(main_hwnd: HWND, entries: Vec<Entry>, panel: Panel, kb: usize, px: u32, cfg: &Config) {
+        let (w, h) = panel.size();
         let work = monitor_work_rect(cfg.dialog_monitor);
         let x = work.left + (work.right - work.left - w) / 2;
         let y = work.top + (work.bottom - work.top - h) / 2;
 
         let created = DLG.with_borrow_mut(|slot| {
             if let Some(d) = slot {
-                d.names = names;
-                d.icons = icons;
-                d.icon_px = icon_px;
-                d.layout = layout;
+                d.entries = entries;
+                d.icon_px = px;
+                d.panel = panel;
                 d.kb = kb;
                 d.hover = kb;
                 d.mouse_last = false;
@@ -225,10 +348,9 @@ mod win {
                 *slot = Some(Dlg {
                     hwnd,
                     main_hwnd,
-                    names,
-                    icons,
-                    icon_px,
-                    layout,
+                    entries,
+                    icon_px: px,
+                    panel,
                     kb,
                     hover: kb,
                     mouse_last: false,
@@ -270,6 +392,10 @@ mod win {
             slot.as_ref()
                 .map_or(0, |d| if d.mouse_last { d.hover } else { d.kb })
         })
+    }
+
+    pub fn is_open() -> bool {
+        DLG.with_borrow(|slot| slot.is_some())
     }
 
     pub fn close() {
@@ -343,10 +469,10 @@ mod win {
                         return false;
                     }
                     d.last_pt = (x, y);
-                    if !d.layout.inside(x, y) {
+                    if !d.panel.inside(x, y) {
                         return false;
                     }
-                    let hover = d.layout.hover(x);
+                    let hover = d.panel.hover(x, y);
                     let changed = !d.mouse_last || d.hover != hover;
                     d.hover = hover;
                     d.mouse_last = true;
@@ -361,8 +487,8 @@ mod win {
                 let (x, y) = mouse_coords(lparam);
                 let post = DLG.with_borrow_mut(|slot| {
                     let d = slot.as_mut().filter(|d| d.hwnd == hwnd)?;
-                    let event = if d.layout.inside(x, y) {
-                        d.hover = d.layout.hover(x);
+                    let event = if d.panel.inside(x, y) {
+                        d.hover = d.panel.hover(x, y);
                         d.mouse_last = true;
                         crate::hook::Event::Commit
                     } else {
@@ -398,7 +524,7 @@ mod win {
                 }
                 let sel = if d.mouse_last { d.hover } else { d.kb };
                 if let Some(x) = &d.d2d {
-                    if draw(x, &d.layout, &d.names, sel).is_err() {
+                    if draw(x, &d.panel, &d.entries, sel).is_err() {
                         d.d2d = None; // device lost: rebuild on the next frame
                     }
                 }
@@ -409,7 +535,11 @@ mod win {
 
     unsafe fn d2d_init(d: &Dlg) -> windows::core::Result<D2d> {
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let (w, h) = d.layout.size();
+        let (w, h) = d.panel.size();
+        let scale = match d.panel {
+            Panel::Row(l) => l.scale,
+            Panel::List(l) => l.scale,
+        };
         let rt = factory.CreateHwndRenderTarget(
             &D2D1_RENDER_TARGET_PROPERTIES::default(),
             &D2D1_HWND_RENDER_TARGET_PROPERTIES {
@@ -426,10 +556,9 @@ mod win {
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            14.0 * d.layout.scale,
+            14.0 * scale,
             w!("en-us"),
         )?;
-        text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         text.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
         text.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
         let props = D2D1_BITMAP_PROPERTIES {
@@ -442,10 +571,10 @@ mod win {
         };
         let px = d.icon_px;
         let bitmaps = d
-            .icons
+            .entries
             .iter()
-            .map(|icon| {
-                icon.as_ref().and_then(|bgra| {
+            .map(|e| {
+                e.icon.as_ref().and_then(|bgra| {
                     rt.CreateBitmap(
                         D2D_SIZE_U { width: px, height: px },
                         Some(bgra.as_ptr() as *const _),
@@ -465,54 +594,93 @@ mod win {
 
     unsafe fn draw(
         x: &D2d,
-        layout: &Layout,
-        names: &[Vec<u16>],
+        panel: &Panel,
+        entries: &[Entry],
         sel: usize,
     ) -> windows::core::Result<()> {
-        let radius = 10.0 * layout.scale;
         x.rt.BeginDraw();
         x.rt.Clear(Some(&BG));
+        match panel {
+            Panel::Row(l) => draw_row(x, l, entries, sel),
+            Panel::List(l) => draw_list(x, l, entries, sel),
+        }
+        x.rt.EndDraw(None, None)
+    }
+
+    unsafe fn draw_row(x: &D2d, l: &Layout, entries: &[Entry], sel: usize) {
+        let radius = 10.0 * l.scale;
         x.brush.SetColor(&HILITE);
         x.rt.FillRoundedRectangle(
-            &D2D1_ROUNDED_RECT { rect: rect(layout.cell(sel)), radiusX: radius, radiusY: radius },
+            &D2D1_ROUNDED_RECT { rect: rect(l.cell(sel)), radiusX: radius, radiusY: radius },
             &x.brush,
         );
         for (i, bitmap) in x.bitmaps.iter().enumerate() {
-            match bitmap {
-                Some(b) => x.rt.DrawBitmap(
-                    b,
-                    Some(&rect(layout.icon(i))),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    None,
-                ),
-                None => {
-                    x.brush.SetColor(&PLACEHOLDER);
-                    x.rt.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: rect(layout.icon(i)),
-                            radiusX: radius,
-                            radiusY: radius,
-                        },
-                        &x.brush,
-                    );
-                }
-            }
+            draw_icon(x, bitmap, l.icon(i), radius);
         }
-        if layout.show_name {
-            if let Some(name) = names.get(sel) {
+        if l.show_name {
+            if let Some(entry) = entries.get(sel) {
+                let _ = x.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                 x.brush.SetColor(&TEXT);
                 x.rt.DrawText(
-                    name,
+                    &entry.name,
                     &x.text,
-                    &rect(layout.label(sel)),
+                    &rect(l.label(sel)),
                     &x.brush,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
             }
         }
-        x.rt.EndDraw(None, None)
+    }
+
+    unsafe fn draw_list(x: &D2d, l: &ListLayout, entries: &[Entry], sel: usize) {
+        let radius = 8.0 * l.scale;
+        x.brush.SetColor(&HILITE);
+        x.rt.FillRoundedRectangle(
+            &D2D1_ROUNDED_RECT { rect: rect(l.row(sel)), radiusX: radius, radiusY: radius },
+            &x.brush,
+        );
+        let _ = x.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        for (i, entry) in entries.iter().enumerate() {
+            draw_icon(x, &x.bitmaps[i], l.icon(i), 6.0 * l.scale);
+            x.brush.SetColor(&TEXT);
+            x.rt.DrawText(
+                &entry.name,
+                &x.text,
+                &rect(l.name(i)),
+                &x.brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            x.brush.SetColor(&DIM);
+            x.rt.DrawText(
+                &entry.title,
+                &x.text,
+                &rect(l.title(i)),
+                &x.brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    unsafe fn draw_icon(x: &D2d, bitmap: &Option<ID2D1Bitmap>, r: [f32; 4], radius: f32) {
+        match bitmap {
+            Some(b) => x.rt.DrawBitmap(
+                b,
+                Some(&rect(r)),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            ),
+            None => {
+                x.brush.SetColor(&PLACEHOLDER);
+                x.rt.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT { rect: rect(r), radiusX: radius, radiusY: radius },
+                    &x.brush,
+                );
+            }
+        }
     }
 }
 
@@ -521,6 +689,7 @@ mod tests {
     use super::*;
 
     const L: Layout = Layout { n: 5, scale: 1.0, show_name: true };
+    const W: ListLayout = ListLayout { n: 4, scale: 1.0 };
 
     #[test]
     fn panel_size_scales() {
@@ -578,26 +747,66 @@ mod tests {
     }
 
     #[test]
-    fn inside_panel_bounds() {
-        let (w, h) = L.size();
-        assert!(L.inside(0, 0));
-        assert!(L.inside(w - 1, h - 1));
-        assert!(!L.inside(-1, 5));
-        assert!(!L.inside(w, 5));
-        assert!(!L.inside(5, h));
+    fn panel_inside_bounds() {
+        let p = Panel::Row(L);
+        let (w, h) = p.size();
+        assert!(p.inside(0, 0));
+        assert!(p.inside(w - 1, h - 1));
+        assert!(!p.inside(-1, 5));
+        assert!(!p.inside(w, 5));
+        assert!(!p.inside(5, h));
     }
 
     #[test]
-    fn label_clamped_to_panel() {
-        let (w, _) = L.size();
-        let first = L.label(0);
-        assert_eq!(first[0], 0.0);
-        let last = L.label(L.n - 1);
-        assert_eq!(last[2], w as f32);
-        let mid = L.label(2);
-        let center = (mid[0] + mid[2]) / 2.0;
-        let [cl, .., cr, _] = L.cell(2);
-        assert_eq!(center, (cl + cr) / 2.0, "label centered under its cell");
-        assert_eq!(mid[3] - mid[1], LABEL_H);
+    fn label_centered_under_its_cell() {
+        // Even at the edges the label stays symmetric around the icon; any
+        // overflow is clipped, never shifted toward the panel center.
+        for i in [0, 2, L.n - 1] {
+            let [ll, lt, lr, lb] = L.label(i);
+            let [cl, _, cr, cb] = L.cell(i);
+            assert_eq!((ll + lr) / 2.0, (cl + cr) / 2.0, "centered under cell {i}");
+            assert_eq!(lt, cb, "label starts under the cell");
+            assert_eq!(lb - lt, LABEL_H);
+        }
+        assert!(L.label(0)[0] < 0.0, "edge label may overflow; clipping handles it");
+    }
+
+    #[test]
+    fn list_rows_tile_the_panel() {
+        let (w, h) = W.size();
+        assert_eq!(w, LIST_W as i32);
+        assert_eq!(h, (2.0 * LIST_PAD + 4.0 * ROW_H) as i32);
+        for i in 0..W.n {
+            let [l, t, r, b] = W.row(i);
+            assert_eq!(b - t, ROW_H);
+            assert_eq!(l, LIST_PAD);
+            assert_eq!(r, LIST_W - LIST_PAD);
+            if i > 0 {
+                assert_eq!(t, W.row(i - 1)[3], "rows adjacent");
+            }
+        }
+    }
+
+    #[test]
+    fn list_row_internals_ordered_and_contained() {
+        let [rl, rt, rr, rb] = W.row(1);
+        let name = W.name(1);
+        let icon = W.icon(1);
+        let title = W.title(1);
+        assert!(rl < name[0] && name[2] <= icon[0], "name | icon");
+        assert!(icon[2] <= title[0] && title[2] <= rr, "icon | title");
+        assert_eq!(icon[2] - icon[0], LIST_ICON);
+        assert_eq!(icon[3] - icon[1], LIST_ICON, "icon square, centered");
+        for r in [name, icon, title] {
+            assert!(r[1] >= rt && r[3] <= rb, "inside the row");
+        }
+    }
+
+    #[test]
+    fn list_hover_clamps() {
+        assert_eq!(W.hover(-50), 0);
+        assert_eq!(W.hover((LIST_PAD + ROW_H / 2.0) as i32), 0);
+        assert_eq!(W.hover((LIST_PAD + 1.5 * ROW_H) as i32), 1);
+        assert_eq!(W.hover(W.size().1 + 100), W.n - 1);
     }
 }
