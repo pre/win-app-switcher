@@ -33,12 +33,25 @@ pub use win::*;
 #[cfg(windows)]
 mod win {
     use super::group_by_key;
-    use windows::core::{BOOL, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use windows::core::{w, BOOL, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, SIZE, WPARAM};
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, BITMAPINFO, BITMAPINFOHEADER,
+        BI_RGB, DIB_RGB_COLORS,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+    use windows::Win32::System::Com::IBindCtx;
     use windows::Win32::System::Threading::{
         AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
         PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::Shell::{
+        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetForegroundWindow, GetParent,
@@ -77,13 +90,131 @@ mod win {
         list
     }
 
-    /// One entry per running app: the topmost window of each executable,
-    /// most-recently-used first. Activating it brings the app forward.
-    pub fn app_windows() -> Vec<HWND> {
+    /// One running application for the app switcher: display name, icon key
+    /// and all its windows in z-order (members[0] is the app's topmost).
+    pub struct AppGroup {
+        pub exe: String,
+        pub name: String,
+        pub windows: Vec<HWND>,
+    }
+
+    /// One group per running app, most-recently-used first.
+    pub fn app_groups() -> Vec<AppGroup> {
         group_by_key(eligible_windows())
             .into_iter()
-            .map(|(_, members)| members[0])
+            .map(|(exe, windows)| AppGroup {
+                name: display_name(&exe),
+                exe,
+                windows,
+            })
             .collect()
+    }
+
+    /// FileDescription from the exe's version resource ("Visual Studio Code"),
+    /// falling back to the file stem ("Code").
+    fn display_name(exe: &str) -> String {
+        unsafe { file_description(exe) }.unwrap_or_else(|| {
+            std::path::Path::new(exe)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| exe.to_string())
+        })
+    }
+
+    unsafe fn file_description(exe: &str) -> Option<String> {
+        let wide: Vec<u16> = exe.encode_utf16().chain([0]).collect();
+        let size = GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None);
+        if size == 0 {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        GetFileVersionInfoW(PCWSTR(wide.as_ptr()), None, size, data.as_mut_ptr() as *mut _)
+            .ok()?;
+        let mut ptr = std::ptr::null_mut();
+        let mut len = 0u32;
+        // First entry of the translation table; exes normally have exactly one.
+        if !VerQueryValueW(
+            data.as_ptr() as *const _,
+            w!("\\VarFileInfo\\Translation"),
+            &mut ptr,
+            &mut len,
+        )
+        .as_bool()
+            || len < 4
+        {
+            return None;
+        }
+        let lang = *(ptr as *const u16);
+        let codepage = *(ptr as *const u16).add(1);
+        let query: Vec<u16> =
+            format!("\\StringFileInfo\\{lang:04X}{codepage:04X}\\FileDescription")
+                .encode_utf16()
+                .chain([0])
+                .collect();
+        if !VerQueryValueW(data.as_ptr() as *const _, PCWSTR(query.as_ptr()), &mut ptr, &mut len)
+            .as_bool()
+            || len == 0
+        {
+            return None;
+        }
+        let chars = std::slice::from_raw_parts(ptr as *const u16, len as usize);
+        let name = String::from_utf16_lossy(chars)
+            .trim_end_matches('\0')
+            .trim()
+            .to_string();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// Premultiplied BGRA pixels (px × px) of the exe's shell icon, cached per
+    /// path for the process lifetime — cold shell extraction can take ~100 ms.
+    /// ponytail: plain exe-path lookup; UWP apps may need the
+    /// shell:AppsFolder\<AUMID> route, verify and wire in M5.
+    pub fn icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
+        thread_local! {
+            static CACHE: RefCell<HashMap<String, Option<Vec<u8>>>> =
+                RefCell::new(HashMap::new());
+        }
+        CACHE.with_borrow_mut(|cache| {
+            cache
+                .entry(exe.to_string())
+                .or_insert_with(|| unsafe { load_icon_bgra(exe, px) })
+                .clone()
+        })
+    }
+
+    unsafe fn load_icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
+        let wide: Vec<u16> = exe.encode_utf16().chain([0]).collect();
+        let item: IShellItemImageFactory =
+            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>).ok()?;
+        let cx = px as i32;
+        // GetImage output is AlphaBlend-ready: 32-bit premultiplied BGRA.
+        let bitmap = item.GetImage(SIZE { cx, cy: cx }, SIIGBF_ICONONLY).ok()?;
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: cx,
+                biHeight: -cx, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = vec![0u8; (px * px * 4) as usize];
+        let dc = CreateCompatibleDC(None);
+        let lines = GetDIBits(
+            dc,
+            bitmap,
+            0,
+            px,
+            Some(bits.as_mut_ptr() as *mut _),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        let _ = DeleteDC(dc);
+        let _ = DeleteObject(bitmap.into());
+        (lines != 0).then_some(bits)
     }
 
     /// All windows of the foreground app in z-order (foreground first).

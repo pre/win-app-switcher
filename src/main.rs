@@ -8,6 +8,8 @@ mod apps;
 mod config;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod hook;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod ui;
 
 #[cfg(not(windows))]
 fn main() {
@@ -41,6 +43,7 @@ mod win {
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
         DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, OUT_DEFAULT_PRECIS, TRANSPARENT,
     };
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::{
         CreateMutexW, GetCurrentProcess, SetPriorityClass, WaitForSingleObject,
@@ -56,7 +59,7 @@ mod win {
         RegisterWindowMessageW, SetForegroundWindow, TrackPopupMenu, TranslateMessage, HICON,
         HWND_BROADCAST, ICONINFO, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_ICONWARNING, MB_OK,
         MB_YESNO, MF_STRING, MSG, MSGFLT_ALLOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-        WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_DESTROY, WM_RBUTTONUP, WNDCLASSW,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_RBUTTONUP, WNDCLASSW,
     };
 
     const CLASS_NAME: PCWSTR = w!("win-app-switcher.main");
@@ -70,11 +73,17 @@ mod win {
     static CONFIG: OnceLock<Config> = OnceLock::new();
 
     /// A switcher session: from the first Next/Prev event to Commit/Cancel.
-    /// Candidates are captured once at session start, in z-order — win mode
-    /// holds the foreground app's windows, app mode one window per app.
-    struct Session {
-        windows: Vec<HWND>,
-        index: usize,
+    /// Candidates are captured once at session start, in z-order.
+    enum Session {
+        /// WIN+TAB: one group per app, shown in the switcher dialog. `kb` is
+        /// the keyboard selection; the mouse selection lives in [`crate::ui`].
+        App {
+            groups: Vec<crate::apps::AppGroup>,
+            kb: usize,
+        },
+        /// WIN+§: the foreground app's windows, cycled with no UI (M4 adds
+        /// the delayed list dialog).
+        Win { windows: Vec<HWND>, index: usize },
     }
 
     thread_local! {
@@ -132,6 +141,10 @@ mod win {
         // elevation; unelevated the OS silently grants HIGH instead.
         unsafe {
             let _ = SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
+            // Shell icon extraction (IShellItemImageFactory) needs COM.
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .context("CoInitializeEx")?;
         }
 
         let config = match config_path().and_then(|p| Config::load(&p)) {
@@ -219,7 +232,7 @@ mod win {
             }
             m if m == crate::hook::WM_SWITCHER => {
                 if let Some(ev) = crate::hook::Event::from_wparam(wparam.0) {
-                    on_event(ev);
+                    on_event(hwnd, ev);
                 }
                 LRESULT(0)
             }
@@ -243,38 +256,95 @@ mod win {
         }
     }
 
-    /// Core switching (M2): no UI yet — sessions cycle a hidden selection and
-    /// activate it when WIN is released.
-    fn on_event(ev: crate::hook::Event) {
+    /// Session logic: WIN+TAB drives the app switcher dialog (M3), WIN+§
+    /// cycles the foreground app's windows with no UI (M2; dialog in M4).
+    /// The dialog's mouse input arrives here too — its wndproc posts the same
+    /// Commit/Cancel events the hook does.
+    fn on_event(main_hwnd: HWND, ev: crate::hook::Event) {
         use crate::hook::Event::*;
         let cfg = CONFIG.get().cloned().unwrap_or_default();
         SESSION.with_borrow_mut(|slot| match ev {
-            AppNext | AppPrev | WinNext | WinPrev => {
-                let s = slot.get_or_insert_with(|| {
-                    let windows = if matches!(ev, WinNext | WinPrev) {
-                        crate::apps::foreground_app_windows(cfg.restore_minimized)
-                    } else {
-                        crate::apps::app_windows()
-                    };
-                    #[cfg(debug_assertions)]
-                    println!("session start: {} candidates", windows.len());
-                    Session { windows, index: 0 }
-                });
-                s.index =
-                    crate::apps::step_index(s.windows.len(), s.index, matches!(ev, AppNext | WinNext));
-            }
-            Commit => {
-                if let Some(s) = slot.take() {
-                    if let Some(&hwnd) = s.windows.get(s.index) {
+            AppNext | AppPrev => {
+                let forward = ev == AppNext;
+                match slot {
+                    None => {
+                        let groups = crate::apps::app_groups();
+                        if groups.is_empty() {
+                            return;
+                        }
                         #[cfg(debug_assertions)]
-                        println!("activate candidate {}/{} ({hwnd:?})", s.index + 1, s.windows.len());
+                        println!("app session: {} apps", groups.len());
+                        // First press lands on the second app: releasing
+                        // instantly switches to the previous app (macOS).
+                        let kb = crate::apps::step_index(groups.len(), 0, forward);
+                        crate::ui::show(main_hwnd, &groups, kb, &cfg);
+                        *slot = Some(Session::App { groups, kb });
+                    }
+                    Some(Session::App { groups, kb }) => {
+                        *kb = crate::apps::step_index(groups.len(), *kb, forward);
+                        crate::ui::kb_select(*kb);
+                    }
+                    // Hook swallows TAB during a WIN+§ session; can't happen.
+                    Some(Session::Win { .. }) => {}
+                }
+            }
+            WinNext | WinPrev => {
+                if slot.is_none() {
+                    let windows = crate::apps::foreground_app_windows(cfg.restore_minimized);
+                    #[cfg(debug_assertions)]
+                    println!("win session: {} candidates", windows.len());
+                    *slot = Some(Session::Win { windows, index: 0 });
+                }
+                if let Some(Session::Win { windows, index }) = slot {
+                    *index =
+                        crate::apps::step_index(windows.len(), *index, matches!(ev, WinNext));
+                }
+            }
+            Commit => match slot.take() {
+                Some(Session::App { groups, .. }) => {
+                    let sel = crate::ui::selection();
+                    if let Some(group) = groups.get(sel) {
+                        #[cfg(debug_assertions)]
+                        println!("activate app {}/{} ({})", sel + 1, groups.len(), group.name);
+                        // Activate first: the dialog holds the foreground, so
+                        // SetForegroundWindow from here is trivially allowed.
+                        crate::apps::activate(group.windows[0], cfg.restore_minimized);
+                    }
+                    crate::ui::close();
+                }
+                Some(Session::Win { windows, index }) => {
+                    if let Some(&hwnd) = windows.get(index) {
+                        #[cfg(debug_assertions)]
+                        println!("activate window {}/{} ({hwnd:?})", index + 1, windows.len());
                         crate::apps::activate(hwnd, cfg.restore_minimized);
                     }
                 }
+                None => {}
+            },
+            Cancel => {
+                if let Some(Session::App { .. }) = slot.take() {
+                    crate::ui::close();
+                }
             }
-            Cancel => *slot = None,
-            // WIN+Q close-all arrives with the app switcher UI (M3).
-            CloseApp => {}
+            // WIN+Q: close every window of the selected app, drop its icon
+            // from the row, keep the session going (macOS Cmd+Q behavior).
+            CloseApp => {
+                if let Some(Session::App { groups, kb }) = slot {
+                    let sel = crate::ui::selection().min(groups.len() - 1);
+                    for hwnd in groups.remove(sel).windows {
+                        unsafe {
+                            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                    if groups.is_empty() {
+                        *slot = None;
+                        crate::ui::close();
+                    } else {
+                        *kb = sel.min(groups.len() - 1);
+                        crate::ui::show(main_hwnd, groups, *kb, &cfg);
+                    }
+                }
+            }
         });
     }
 

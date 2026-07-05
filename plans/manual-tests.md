@@ -107,6 +107,50 @@ Next/Prev event and `activate candidate i/N` on commit.
 17. WIN+Q during a session does nothing yet (M3) and Windows Search does
     not open.
 
-## M3 — App switcher UI (later)
+## M3 — App switcher UI
+
+### Dialog basics
+1. Several apps open: WIN+TAB → a dark rounded panel appears centered on the
+   monitor under the mouse, one icon per app, most-recently-used first.
+   The **second** icon is highlighted and its app name is shown underneath.
+2. Quick WIN+TAB tap still switches instantly to the previous app (the
+   dialog may only flash briefly).
+3. Hold WIN: TAB advances the highlight, SHIFT+TAB goes back, Right/Left
+   arrows likewise; the selection wraps at both ends. The name label follows
+   the selection.
+4. Releasing WIN activates the highlighted app; the dialog closes.
+5. ESC closes the dialog, focus stays where it was.
+6. The dialog itself never appears as an entry in the icon row.
+7. Icons look correct for Win32 apps; an app without an extractable icon
+   shows a dim placeholder square (UWP icon polish is M5).
+
+### Mouse
+8. Hovering an icon moves the highlight to it; releasing WIN then activates
+   the hovered app.
+9. Hover an icon, then press TAB: the highlight jumps from the keyboard
+   position (mouse and keyboard selections are independent, macOS style);
+   releasing WIN activates the keyboard selection. Moving the mouse again
+   takes the highlight back.
+10. Left click on an icon activates that app immediately.
+11. Click outside the panel → dialog closes, no switch (releasing WIN
+    afterwards does nothing).
+12. The dialog opening under a still mouse does **not** steal the selection
+    (a spurious hover only counts after real movement).
+
+### WIN+Q
+13. WIN+TAB, select an app with multiple windows, press Q while WIN held:
+    all of that app's windows close, its icon leaves the row, the dialog
+    stays open and shrinks; the highlight lands on the next app.
+14. Q on the last remaining app closes the dialog.
+15. An app with unsaved changes shows its own "save?" prompt instead of
+    dying silently (WM_CLOSE, not termination).
+
+### Config
+16. `scale = 2.0` → everything (panel, icons, text) doubles.
+17. `show_selected_name = false` → no name strip, panel is shorter.
+18. `dialog_monitor = "primary"` → dialog always opens on the primary
+    monitor regardless of the mouse.
+
+## M4 — Window switcher UI (later)
 ## M4 — Window switcher UI (later)
 ## M5 — Polish (later)
