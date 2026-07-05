@@ -48,7 +48,6 @@ pub enum Event {
 }
 
 impl Event {
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn from_wparam(w: usize) -> Option<Event> {
         use Event::*;
         [AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp]

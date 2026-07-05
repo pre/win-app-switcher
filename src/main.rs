@@ -1,8 +1,11 @@
 // Debug builds keep the console so hook events are visible with println!.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+// Pure logic in these modules is cross-platform for `cargo test`;
+// only tests use it off-Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod apps;
 mod config;
-// Pure state machine is cross-platform for `cargo test`; only tests use it off-Windows.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod hook;
 
@@ -24,7 +27,9 @@ fn main() {
 mod win {
     use crate::config::Config;
     use anyhow::{ensure, Context, Result};
+    use std::cell::RefCell;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::OnceLock;
     use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{
         COLORREF, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT,
@@ -62,6 +67,20 @@ mod win {
 
     /// Broadcast "please exit" message id, registered before the window exists.
     static EXIT_MSG: AtomicU32 = AtomicU32::new(0);
+    static CONFIG: OnceLock<Config> = OnceLock::new();
+
+    /// A switcher session: from the first Next/Prev event to Commit/Cancel.
+    /// Candidates are captured once at session start, in z-order — win mode
+    /// holds the foreground app's windows, app mode one window per app.
+    struct Session {
+        windows: Vec<HWND>,
+        index: usize,
+    }
+
+    thread_local! {
+        // Touched only by the main thread's wndproc.
+        static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
+    }
 
     pub enum Severity {
         Warning,
@@ -115,8 +134,7 @@ mod win {
             let _ = SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
         }
 
-        // M0 only proves the config loads; later milestones consume it.
-        let _config = match config_path().and_then(|p| Config::load(&p)) {
+        let config = match config_path().and_then(|p| Config::load(&p)) {
             Ok(c) => c,
             Err(e) => {
                 alert(
@@ -126,6 +144,7 @@ mod win {
                 Config::default()
             }
         };
+        let _ = CONFIG.set(config);
 
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None).context("GetModuleHandleW")?.into();
@@ -198,13 +217,10 @@ mod win {
                 show_tray_menu(hwnd);
                 LRESULT(0)
             }
-            // M1: the hook's events arrive here; M2 starts acting on them.
             m if m == crate::hook::WM_SWITCHER => {
-                #[cfg(debug_assertions)]
-                println!(
-                    "main thread received: {:?}",
-                    crate::hook::Event::from_wparam(wparam.0)
-                );
+                if let Some(ev) = crate::hook::Event::from_wparam(wparam.0) {
+                    on_event(ev);
+                }
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -225,6 +241,41 @@ mod win {
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
+    }
+
+    /// Core switching (M2): no UI yet — sessions cycle a hidden selection and
+    /// activate it when WIN is released.
+    fn on_event(ev: crate::hook::Event) {
+        use crate::hook::Event::*;
+        let cfg = CONFIG.get().cloned().unwrap_or_default();
+        SESSION.with_borrow_mut(|slot| match ev {
+            AppNext | AppPrev | WinNext | WinPrev => {
+                let s = slot.get_or_insert_with(|| {
+                    let windows = if matches!(ev, WinNext | WinPrev) {
+                        crate::apps::foreground_app_windows(cfg.restore_minimized)
+                    } else {
+                        crate::apps::app_windows()
+                    };
+                    #[cfg(debug_assertions)]
+                    println!("session start: {} candidates", windows.len());
+                    Session { windows, index: 0 }
+                });
+                s.index =
+                    crate::apps::step_index(s.windows.len(), s.index, matches!(ev, AppNext | WinNext));
+            }
+            Commit => {
+                if let Some(s) = slot.take() {
+                    if let Some(&hwnd) = s.windows.get(s.index) {
+                        #[cfg(debug_assertions)]
+                        println!("activate candidate {}/{} ({hwnd:?})", s.index + 1, s.windows.len());
+                        crate::apps::activate(hwnd, cfg.restore_minimized);
+                    }
+                }
+            }
+            Cancel => *slot = None,
+            // WIN+Q close-all arrives with the app switcher UI (M3).
+            CloseApp => {}
+        });
     }
 
     unsafe fn show_tray_menu(hwnd: HWND) {

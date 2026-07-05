@@ -67,8 +67,46 @@ Repeat the key tests with the release build to confirm it behaves the same
     stuck WIN (press E: Explorer must NOT open).
 12. Quit from the tray → WIN+TAB opens Task View again (hook gone with process).
 
-## M2 — Core switching (later)
-## M2 — Core switching (later)
+## M2 — Core switching
+
+No dialogs yet: a switch is visible only as a focus change. Use a debug
+build — the console prints `session start: N candidates` on the first
+Next/Prev event and `activate candidate i/N` on commit.
+
+### WIN+§ — window switching within the active app
+1. Two Notepad windows, focus one. Quick WIN+§ tap → focus flips to the
+   other window. Tap again → flips back.
+2. Three windows of the same app: hold WIN, tap § twice → releasing WIN
+   lands on the third (z-order: each § steps to a less recent window).
+3. WIN+SHIFT+§ steps the other way: from the newest straight to the oldest.
+4. ESC while WIN still held after § → focus stays where it was.
+5. Other apps' windows interleaved in z-order (Notepad, Explorer, Notepad):
+   WIN+§ cycles only the foreground app's windows.
+6. App with a single window: WIN+§ leaves focus in place, no errors.
+7. Minimize one of two Notepad windows: WIN+§ restores and focuses it
+   (default `restore_minimized = true`).
+8. Set `restore_minimized = false`: WIN+§ now skips the minimized window
+   entirely (only visible windows cycle).
+9. A dialog in focus (e.g. Notepad's Save As): WIN+§ still cycles the
+   app's windows (owner walk works).
+
+### WIN+TAB — app switching (no UI yet)
+10. Quick WIN+TAB tap → focus jumps to the previously used app; tapping
+    again toggles between the two most recent apps (macOS behavior).
+11. Hold WIN, TAB TAB → third most recent app on release.
+12. WIN+SHIFT+TAB as the first press → least recently used app (wrap).
+13. Grouping: two Notepad windows + Explorer → WIN+TAB toggles
+    Notepad↔Explorer as apps; the debug log candidate count equals the
+    number of distinct apps, not windows.
+14. UWP apps (e.g. Calculator, Settings) appear as their own apps, not as
+    a shared "ApplicationFrameHost" group: with both open, WIN+TAB
+    reaches each separately.
+15. Elevated app (admin PowerShell) is listed and switchable when the
+    switcher runs elevated.
+16. ESC during a WIN+TAB session → focus unchanged.
+17. WIN+Q during a session does nothing yet (M3) and Windows Search does
+    not open.
+
 ## M3 — App switcher UI (later)
 ## M4 — Window switcher UI (later)
 ## M5 — Polish (later)
