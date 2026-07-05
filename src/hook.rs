@@ -206,10 +206,27 @@ mod win {
             let kb = *(lparam.0 as *const KBDLLHOOKSTRUCT);
             // Skip injected events (our own dummy key) to avoid feedback loops.
             if !kb.flags.contains(LLKHF_INJECTED) {
+                let up = kb.flags.contains(LLKHF_UP);
                 if let Some(key) = map_key(kb.vkCode, kb.scanCode) {
-                    let up = kb.flags.contains(LLKHF_UP);
                     let shift = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                     let actions = step(&mut STATE.lock().unwrap(), key, up, shift);
+                    #[cfg(debug_assertions)]
+                    {
+                        let mut verdict =
+                            if actions.swallow { "swallow" } else { "pass through" }.to_string();
+                        if actions.inject_dummy {
+                            verdict += ", inject dummy key (Start menu will not open)";
+                        }
+                        if let Some(ev) = actions.event {
+                            verdict += &format!(", post {ev:?}");
+                        }
+                        println!(
+                            "{key:?} {} (vk=0x{:02X} scan=0x{:02X} shift={shift}): {verdict}",
+                            if up { "up" } else { "down" },
+                            kb.vkCode,
+                            kb.scanCode
+                        );
+                    }
                     if actions.inject_dummy {
                         inject_dummy();
                     }
@@ -221,6 +238,14 @@ mod win {
                     if actions.swallow {
                         return LRESULT(1);
                     }
+                } else {
+                    #[cfg(debug_assertions)]
+                    println!(
+                        "unwatched key {} (vk=0x{:02X} scan=0x{:02X}): pass through",
+                        if up { "up" } else { "down" },
+                        kb.vkCode,
+                        kb.scanCode
+                    );
                 }
             }
         }

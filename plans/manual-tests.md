@@ -36,10 +36,13 @@ Build: `cargo xwin build --release --target x86_64-pc-windows-msvc`, copy
 
 ## M1 — Hook
 
-Use a **debug** build for the event log (it keeps a console window):
-`cargo xwin build --target x86_64-pc-windows-msvc`. Run it from a terminal;
-each hook event prints as `hook event: Some(AppNext)` etc. Repeat the key
-tests with the release build to confirm it behaves the same (minus the log).
+Use a **debug** build for the event log: `make debug`, then run the exe from
+`target/x86_64-pc-windows-msvc/debug/` (double-clicking opens its console).
+Every key the hook sees prints with its interpretation, e.g.
+`Tab down (vk=0x09 scan=0x0F shift=false): swallow, inject dummy key (Start
+menu will not open), post AppNext`; unwatched keys print their vk/scan codes.
+Repeat the key tests with the release build to confirm it behaves the same
+(minus the log).
 
 ### Swallowing & events
 1. WIN+TAB → Task View does **not** open; console prints `AppNext`.

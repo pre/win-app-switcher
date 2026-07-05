@@ -201,7 +201,10 @@ mod win {
             // M1: the hook's events arrive here; M2 starts acting on them.
             m if m == crate::hook::WM_SWITCHER => {
                 #[cfg(debug_assertions)]
-                println!("hook event: {:?}", crate::hook::Event::from_wparam(wparam.0));
+                println!(
+                    "main thread received: {:?}",
+                    crate::hook::Event::from_wparam(wparam.0)
+                );
                 LRESULT(0)
             }
             WM_DESTROY => {
