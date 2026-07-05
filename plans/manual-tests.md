@@ -185,6 +185,15 @@ Next/Prev event and `activate candidate i/N` on commit.
 9. Left/Right arrows during the list pass through (WIN+Left snap fires);
    Up/Down during the app switcher pass through (WIN+Up maximize fires).
 
+### WIN+W
+10. W while the list is open closes only the highlighted window: its row
+    leaves the list, the list shrinks, the app keeps running and the
+    session stays open. W on the last row closes the list.
+11. Holding W down closes only one window (autorepeat is ignored); a
+    release + fresh press closes the next one.
+12. W in the WIN+TAB app switcher does nothing (and the widgets pane does
+    not open).
+
 ## M5 — Polish
 
 ### Desktop filter (needs 2+ virtual desktops)

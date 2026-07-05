@@ -454,6 +454,41 @@ mod win {
                     }
                 }
             }
+            // W in the window list: close only the selected window, keep the
+            // app and the session going (macOS Cmd+W behavior).
+            CloseWindow => {
+                if let Some(Session::Win { exe, windows, index }) = slot {
+                    if windows.is_empty() {
+                        return;
+                    }
+                    let sel = if crate::ui::is_open() {
+                        crate::ui::selection()
+                    } else {
+                        *index
+                    }
+                    .min(windows.len() - 1);
+                    let hwnd = windows.remove(sel);
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                    if windows.is_empty() {
+                        unsafe {
+                            let _ = KillTimer(Some(main_hwnd), TIMER_WINLIST);
+                        }
+                        *slot = None;
+                        crate::ui::close();
+                    } else {
+                        *index = sel.min(windows.len() - 1);
+                        if crate::ui::is_open() {
+                            let name = crate::apps::display_name(exe);
+                            let icon = crate::apps::icon_source(windows[0], exe);
+                            let titles: Vec<String> =
+                                windows.iter().map(|&w| crate::apps::window_title(w)).collect();
+                            crate::ui::show_list(main_hwnd, &name, &icon, &titles, *index, &cfg);
+                        }
+                    }
+                }
+            }
         });
     }
 

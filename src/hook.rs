@@ -5,7 +5,7 @@
 //!
 //! Key facts the logic encodes:
 //! - WIN down/up always PASS through, so WIN+L, WIN+D … keep working and the
-//!   OS never sees WIN stuck down. Only TAB / § / Q / ESC / arrows are
+//!   OS never sees WIN stuck down. Only TAB / § / Q / W / ESC / arrows are
 //!   swallowed, and only during a switcher session.
 //! - On session start a dummy key (VK 0xFF, unassigned) is injected while WIN
 //!   is still down, so Windows sees WIN as a combo, not a tap: the Start menu
@@ -30,6 +30,7 @@ pub enum Key {
     Section,
     Esc,
     Q,
+    W,
     Left,
     Right,
     Up,
@@ -49,12 +50,14 @@ pub enum Event {
     Cancel,
     /// Q pressed in app mode: close all windows of the selected app.
     CloseApp,
+    /// W pressed in win mode: close only the selected window.
+    CloseWindow,
 }
 
 impl Event {
     pub fn from_wparam(w: usize) -> Option<Event> {
         use Event::*;
-        [AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp]
+        [AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp, CloseWindow]
             .into_iter()
             .find(|e| *e as usize == w)
     }
@@ -64,14 +67,16 @@ impl Event {
 pub struct State {
     pub mode: Mode,
     pub win_down: bool,
-    /// Q held down — its autorepeat must not close one app per repeat.
+    /// Q/W held down — their autorepeat must not close one thing per repeat.
     pub q_down: bool,
+    pub w_down: bool,
 }
 
 pub const IDLE: State = State {
     mode: Mode::None,
     win_down: false,
     q_down: false,
+    w_down: false,
 };
 
 pub struct Actions {
@@ -87,12 +92,14 @@ const PASS: Actions = Actions {
 };
 
 pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
-    // Tracked across sessions: a Q already held when a session starts (or
+    // Tracked across sessions: a Q/W already held when a session starts (or
     // held over a session boundary) is not a fresh press either.
-    let q_repeat = key == Key::Q && !up && s.q_down;
-    if key == Key::Q {
-        s.q_down = !up;
-    }
+    let was_down = match key {
+        Key::Q => std::mem::replace(&mut s.q_down, !up),
+        Key::W => std::mem::replace(&mut s.w_down, !up),
+        _ => false,
+    };
+    let repeat = !up && was_down;
     match (key, up) {
         (Key::Win, false) => {
             s.win_down = true;
@@ -140,12 +147,17 @@ pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
                 inject_dummy: false,
             }
         }
-        // Swallow Q both ways during any session so WIN+Q never opens Search.
-        // One CloseApp per physical press: autorepeat closes nothing more
-        // until a key-up is seen.
+        // Swallow Q/W both ways during any session (WIN+Q would open Search,
+        // WIN+W the widgets pane). One close per physical press: autorepeat
+        // closes nothing more until a key-up is seen.
         (Key::Q, up) if s.mode != Mode::None => Actions {
             swallow: true,
-            event: (!up && !q_repeat && s.mode == Mode::App).then_some(Event::CloseApp),
+            event: (!up && !repeat && s.mode == Mode::App).then_some(Event::CloseApp),
+            inject_dummy: false,
+        },
+        (Key::W, up) if s.mode != Mode::None => Actions {
+            swallow: true,
+            event: (!up && !repeat && s.mode == Mode::Win).then_some(Event::CloseWindow),
             inject_dummy: false,
         },
         // Arrows move the selection (Left/Right in the app switcher, Up/Down
@@ -192,7 +204,7 @@ mod win {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
         KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN,
-        VK_Q, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_TAB, VK_UP,
+        VK_Q, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_TAB, VK_UP, VK_W,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetMessageW, PostMessageW, SetWindowsHookExW, HC_ACTION, KBDLLHOOKSTRUCT,
@@ -233,6 +245,7 @@ mod win {
             VK_TAB => Some(Key::Tab),
             VK_ESCAPE => Some(Key::Esc),
             VK_Q => Some(Key::Q),
+            VK_W => Some(Key::W),
             VK_LEFT => Some(Key::Left),
             VK_RIGHT => Some(Key::Right),
             VK_UP => Some(Key::Up),
@@ -391,6 +404,7 @@ mod tests {
             Key::Section,
             Key::Esc,
             Key::Q,
+            Key::W,
             Key::Left,
             Key::Right,
             Key::Up,
@@ -471,9 +485,38 @@ mod tests {
     }
 
     #[test]
+    fn w_closes_one_window_only_in_win_mode() {
+        let mut s = IDLE;
+        step(&mut s, Key::Win, false, false);
+        step(&mut s, Key::Tab, false, false);
+        let a = step(&mut s, Key::W, false, false);
+        assert!(a.swallow && a.event.is_none(), "swallowed but no-op in app mode");
+        step(&mut s, Key::W, true, false);
+        step(&mut s, Key::Win, true, false);
+
+        step(&mut s, Key::Win, false, false);
+        step(&mut s, Key::Section, false, false);
+        let a = step(&mut s, Key::W, false, false);
+        assert!(a.swallow);
+        assert_eq!(a.event, Some(Event::CloseWindow));
+        // Held W autorepeats: swallowed, but no second window closes.
+        let a = step(&mut s, Key::W, false, false);
+        assert!(a.swallow && a.event.is_none());
+        let a = step(&mut s, Key::W, true, false);
+        assert!(a.swallow && a.event.is_none());
+        // A fresh press closes the next one.
+        assert_eq!(
+            step(&mut s, Key::W, false, false).event,
+            Some(Event::CloseWindow)
+        );
+    }
+
+    #[test]
     fn event_wparam_roundtrip() {
         use Event::*;
-        for ev in [AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp] {
+        for ev in [
+            AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp, CloseWindow,
+        ] {
             assert_eq!(Event::from_wparam(ev as usize), Some(ev));
         }
         assert_eq!(Event::from_wparam(999), None);

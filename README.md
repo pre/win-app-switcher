@@ -23,6 +23,7 @@ How it differs from the built-in alt-tab:
 | Release `WIN` | Activate the selection |
 | Left click | Activate immediately |
 | `WIN+Q` | Close all windows of the selected application |
+| `WIN+W` | Close the selected window (in the window list) |
 | `ESC` | Cancel |
 
 ## Start at login
