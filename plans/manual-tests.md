@@ -25,6 +25,10 @@ Build: `cargo xwin build --release --target x86_64-pc-windows-msvc`, copy
    Exactly one tray icon; exactly one process in Task Manager.
 8. Elevation cross-check: start the first instance as administrator, the second
    normally, choose **Yes** → restart still works (message filter allows it).
+9. Debug build: at most one console window at a time. During the restart
+   dialog no new console has opened yet; after **Yes** the old console goes
+   away with the old instance and a fresh console shows the new build hash.
+   Choosing **No** never flashes a console at all.
 
 ### Config
 9. No `config.toml` next to the exe → starts silently with defaults.

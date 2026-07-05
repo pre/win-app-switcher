@@ -1,5 +1,6 @@
-// Debug builds keep the console so hook events are visible with println!.
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// No automatic console: debug builds allocate theirs after the single-
+// instance gate (see run()), so a restart never shows two consoles at once.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 // Pure logic in these modules is cross-platform for `cargo test`;
 // only tests use it off-Windows.
@@ -115,8 +116,6 @@ mod win {
     }
 
     pub fn run() -> Result<()> {
-        #[cfg(debug_assertions)]
-        println!("win-app-switcher build {}", env!("GIT_HASH"));
         let exit_msg = unsafe { RegisterWindowMessageW(w!("win-app-switcher.exit")) };
         ensure!(exit_msg != 0, "RegisterWindowMessageW failed");
         EXIT_MSG.store(exit_msg, Ordering::Relaxed);
@@ -144,6 +143,15 @@ mod win {
                     "the running instance did not exit within 5 seconds"
                 );
             }
+        }
+
+        // The hook-event log console, only now that this instance is the
+        // survivor: the replaced instance's console is already gone, so at
+        // most one console is ever on screen.
+        #[cfg(debug_assertions)]
+        unsafe {
+            let _ = windows::Win32::System::Console::AllocConsole();
+            println!("win-app-switcher build {}", env!("GIT_HASH"));
         }
 
         // Switching must stay fast under full CPU load. REALTIME needs

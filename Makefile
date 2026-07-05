@@ -9,8 +9,8 @@ build:
 	$(CARGO) xwin build --release --target $(TARGET)
 	@ls -lh target/$(TARGET)/release/win-app-switcher.exe
 
-# Console subsystem: double-clicking the exe opens a console that logs
-# every key event the hook sees and how it was interpreted.
+# The debug build allocates a console at startup (after the single-instance
+# gate) that logs the build hash and every key event the hook sees.
 debug:
 	$(CARGO) xwin build --target $(TARGET)
 	@ls -lh target/$(TARGET)/debug/win-app-switcher.exe
