@@ -2,7 +2,7 @@
 /// running build is identifiable from the tray tooltip and the debug console.
 fn main() {
     let hash = std::process::Command::new("git")
-        .args(["describe", "--always", "--dirty"])
+        .args(["describe", "--always", "--dirty", "--abbrev=8"])
         .output()
         .ok()
         .filter(|o| o.status.success())
