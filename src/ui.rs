@@ -4,16 +4,18 @@
 //! below renders it with Direct2D + DirectWrite and feeds mouse input back
 //! to the main thread as the same [`crate::hook::Event`]s the hook posts.
 //!
-//! The window recipe is AltAppSwitcher's proven one: WS_POPUP topmost tool
+//! The input recipe is AltAppSwitcher's proven one: WS_POPUP topmost tool
 //! window, made foreground, mouse captured with SetCapture so a click
-//! outside the panel is seen (and cancels), Win11 rounded corners via
-//! DwmSetWindowAttribute. Both dialogs share the window class, renderer and
-//! input path; only the layout differs.
+//! outside the panel is seen (and cancels). Rendering goes through a
+//! layered window (UpdateLayeredWindow + premultiplied DIB): the rounded
+//! panel corners are drawn with real alpha, macOS style, on any Windows
+//! version. Both dialogs share the window class, renderer and input path;
+//! only the layout differs.
 
 /// Unscaled layout constants, in pixels. Icon row:
 const ICON: f32 = 64.0;
 const CELL: f32 = 84.0; // icon cell = selection square
-const PAD: f32 = 16.0; // panel padding around the row
+const PAD: f32 = 24.0; // panel padding around the row
 const LABEL_H: f32 = 30.0; // name strip under the icons
 
 /// Window list:
@@ -22,6 +24,9 @@ const LIST_W: f32 = 560.0;
 const LIST_PAD: f32 = 12.0; // panel padding and selection inset
 const NAME_W: f32 = 150.0; // app-name column
 const LIST_ICON: f32 = 28.0;
+
+/// Panel corner radius, macOS style.
+const RADIUS: f32 = 16.0;
 
 #[derive(Clone, Copy)]
 pub struct Layout {
@@ -143,6 +148,13 @@ impl Panel {
         }
     }
 
+    pub fn scale(&self) -> f32 {
+        match self {
+            Panel::Row(l) => l.scale,
+            Panel::List(l) => l.scale,
+        }
+    }
+
     pub fn hover(&self, x: i32, y: i32) -> usize {
         match self {
             Panel::Row(l) => l.hover(x),
@@ -161,21 +173,23 @@ pub use win::{close, is_open, kb_select, selection, show, show_list};
 
 #[cfg(windows)]
 mod win {
-    use super::{Layout, ListLayout, Panel};
-    use crate::config::{Config, DialogMonitor};
+    use super::{Layout, ListLayout, Panel, RADIUS};
+    use crate::config::{Config, DialogMonitor, Theme};
     use std::cell::RefCell;
     use std::sync::Once;
     use windows::core::w;
-    use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows::Win32::Foundation::{
+        COLORREF, ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    };
     use windows::Win32::Graphics::Direct2D::Common::{
         D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
     };
     use windows::Win32::Graphics::Direct2D::{
-        D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget,
+        D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory,
         ID2D1SolidColorBrush, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
-        D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-        D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
-        D2D1_ROUNDED_RECT,
+        D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+        D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
     };
     use windows::Win32::Graphics::DirectWrite::{
         DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
@@ -184,29 +198,87 @@ mod win {
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
         DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
     };
-    use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    };
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
     use windows::Win32::Graphics::Gdi::{
-        BeginPaint, CreateSolidBrush, EndPaint, GetMonitorInfoW, InvalidateRect, MonitorFromPoint,
-        UpdateWindow, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, PAINTSTRUCT,
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetMonitorInfoW,
+        MonitorFromPoint, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER,
+        BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, MONITORINFO,
+        MONITOR_DEFAULTTOPRIMARY,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, LoadCursorW, PostMessageW,
-        RegisterClassW, SetWindowPos, ShowWindow, IDC_ARROW, SWP_NOACTIVATE, SWP_NOZORDER,
-        SW_SHOW, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WNDCLASSW, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_POPUP,
+        RegisterClassW, SetWindowPos, ShowWindow, UpdateLayeredWindow, CS_DROPSHADOW, IDC_ARROW,
+        SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEMOVE, WNDCLASSW,
+        WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
-    // ponytail: dark palette only; theme auto/light/dark wiring is M5.
-    const BG: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.118, g: 0.118, b: 0.125, a: 1.0 };
-    const HILITE: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 };
-    const PLACEHOLDER: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 };
-    const TEXT: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.9 };
-    const DIM: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.6 };
+    struct Palette {
+        bg: D2D1_COLOR_F,
+        hilite: D2D1_COLOR_F,
+        placeholder: D2D1_COLOR_F,
+        text: D2D1_COLOR_F,
+        dim: D2D1_COLOR_F,
+    }
+
+    const fn white(a: f32) -> D2D1_COLOR_F {
+        D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a }
+    }
+    const fn black(a: f32) -> D2D1_COLOR_F {
+        D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a }
+    }
+
+    /// Panel backgrounds match the Windows taskbar grays (#202020 / #EEEEEE).
+    const DARK: Palette = Palette {
+        bg: D2D1_COLOR_F { r: 0.125, g: 0.125, b: 0.125, a: 1.0 },
+        hilite: white(0.16),
+        placeholder: white(0.08),
+        text: white(0.9),
+        dim: white(0.6),
+    };
+    const LIGHT: Palette = Palette {
+        bg: D2D1_COLOR_F { r: 0.933, g: 0.933, b: 0.933, a: 1.0 },
+        hilite: black(0.12),
+        placeholder: black(0.06),
+        text: black(0.85),
+        dim: black(0.55),
+    };
+
+    const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+
+    fn palette(cfg: &Config) -> &'static Palette {
+        let light = match cfg.theme {
+            Theme::Light => true,
+            Theme::Dark => false,
+            Theme::Auto => system_light_theme(),
+        };
+        if light {
+            &LIGHT
+        } else {
+            &DARK
+        }
+    }
+
+    /// The taskbar follows SystemUsesLightTheme (not AppsUseLightTheme), and
+    /// the panel color is meant to match the taskbar.
+    fn system_light_theme() -> bool {
+        unsafe {
+            let mut value: u32 = 0;
+            let mut len = std::mem::size_of::<u32>() as u32;
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                w!("SystemUsesLightTheme"),
+                RRF_RT_REG_DWORD,
+                None,
+                Some(&mut value as *mut u32 as *mut _),
+                Some(&mut len),
+            ) == ERROR_SUCCESS
+                && value != 0
+        }
+    }
 
     const DLG_CLASS: windows::core::PCWSTR = w!("win-app-switcher.dialog");
 
@@ -222,18 +294,32 @@ mod win {
         entries: Vec<Entry>,
         icon_px: u32,
         panel: Panel,
+        pal: &'static Palette,
         kb: usize,
         hover: usize,
         mouse_last: bool,
         last_pt: (i32, i32),
-        d2d: Option<D2d>, // dropped on device loss or refresh, rebuilt on paint
+        d2d: Option<D2d>, // dropped on device loss or refresh, rebuilt on render
     }
 
+    /// Direct2D drawing into a premultiplied DIB that UpdateLayeredWindow
+    /// pushes to the screen — real alpha at the rounded corners.
     struct D2d {
-        rt: ID2D1HwndRenderTarget,
+        rt: ID2D1DCRenderTarget,
+        dc: HDC,
+        bmp: HBITMAP,
         brush: ID2D1SolidColorBrush,
         text: IDWriteTextFormat,
         bitmaps: Vec<Option<ID2D1Bitmap>>,
+    }
+
+    impl Drop for D2d {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.dc);
+                let _ = DeleteObject(self.bmp.into());
+            }
+        }
     }
 
     thread_local! {
@@ -299,19 +385,20 @@ mod win {
         let work = monitor_work_rect(cfg.dialog_monitor);
         let x = work.left + (work.right - work.left - w) / 2;
         let y = work.top + (work.bottom - work.top - h) / 2;
+        let pal = palette(cfg);
 
         let created = DLG.with_borrow_mut(|slot| {
             if let Some(d) = slot {
                 d.entries = entries;
                 d.icon_px = px;
                 d.panel = panel;
+                d.pal = pal;
                 d.kb = kb;
                 d.hover = kb;
                 d.mouse_last = false;
-                d.d2d = None; // sizes changed: rebuild the render target on next paint
+                d.d2d = None; // sizes changed: rebuild the surface on next render
                 unsafe {
                     let _ = SetWindowPos(d.hwnd, None, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
-                    let _ = InvalidateRect(Some(d.hwnd), None, false);
                 }
                 return None;
             }
@@ -319,7 +406,7 @@ mod win {
                 register_class();
                 let hinstance = GetModuleHandleW(None).unwrap_or_default();
                 let Ok(hwnd) = CreateWindowExW(
-                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
                     DLG_CLASS,
                     w!(""),
                     WS_POPUP,
@@ -334,12 +421,6 @@ mod win {
                 ) else {
                     return None;
                 };
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_WINDOW_CORNER_PREFERENCE,
-                    &DWMWCP_ROUND as *const _ as *const _,
-                    std::mem::size_of_val(&DWMWCP_ROUND) as u32,
-                );
                 // Remember where the cursor is so the spurious WM_MOUSEMOVE a
                 // new window under the cursor receives does not hijack the
                 // selection before the mouse actually moves.
@@ -351,6 +432,7 @@ mod win {
                     entries,
                     icon_px: px,
                     panel,
+                    pal,
                     kb,
                     hover: kb,
                     mouse_last: false,
@@ -360,6 +442,9 @@ mod win {
                 Some(hwnd)
             }
         });
+        // Content is pushed with UpdateLayeredWindow before the window shows:
+        // no background flash, ever.
+        render();
         if let Some(hwnd) = created {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOW);
@@ -374,15 +459,16 @@ mod win {
 
     /// Keyboard moved the selection.
     pub fn kb_select(kb: usize) {
-        let hwnd = DLG.with_borrow_mut(|slot| {
-            slot.as_mut().map(|d| {
-                d.kb = kb;
-                d.mouse_last = false;
-                d.hwnd
-            })
+        let changed = DLG.with_borrow_mut(|slot| {
+            slot.as_mut()
+                .map(|d| {
+                    d.kb = kb;
+                    d.mouse_last = false;
+                })
+                .is_some()
         });
-        if let Some(hwnd) = hwnd {
-            redraw(hwnd);
+        if changed {
+            render();
         }
     }
 
@@ -407,24 +493,51 @@ mod win {
         }
     }
 
-    fn redraw(hwnd: HWND) {
-        unsafe {
-            let _ = InvalidateRect(Some(hwnd), None, false);
-            let _ = UpdateWindow(hwnd);
-        }
+    /// Draw the current state and push it to the screen.
+    fn render() {
+        DLG.with_borrow_mut(|slot| {
+            let Some(d) = slot.as_mut() else { return };
+            unsafe {
+                if d.d2d.is_none() {
+                    d.d2d = d2d_init(d).ok();
+                }
+                let sel = if d.mouse_last { d.hover } else { d.kb };
+                let Some(x) = &d.d2d else { return };
+                if draw(x, &d.panel, &d.entries, sel, d.pal).is_err() {
+                    d.d2d = None; // device lost: rebuild on the next render
+                    return;
+                }
+                let (w, h) = d.panel.size();
+                let blend = BLENDFUNCTION {
+                    BlendOp: AC_SRC_OVER as u8,
+                    BlendFlags: 0,
+                    SourceConstantAlpha: 255,
+                    AlphaFormat: AC_SRC_ALPHA as u8,
+                };
+                let _ = UpdateLayeredWindow(
+                    d.hwnd,
+                    None,
+                    None,
+                    Some(&SIZE { cx: w, cy: h }),
+                    Some(x.dc),
+                    Some(&POINT { x: 0, y: 0 }),
+                    COLORREF(0),
+                    Some(&blend),
+                    ULW_ALPHA,
+                );
+            }
+        });
     }
 
     unsafe fn register_class() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             let wc = WNDCLASSW {
+                style: CS_DROPSHADOW,
                 lpfnWndProc: Some(wndproc),
                 hInstance: GetModuleHandleW(None).unwrap_or_default().into(),
                 lpszClassName: DLG_CLASS,
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                // Class brush in the panel color: no white flash before the
-                // first Direct2D frame.
-                hbrBackground: CreateSolidBrush(COLORREF(0x0020_1E1E)),
                 ..Default::default()
             };
             RegisterClassW(&wc);
@@ -479,7 +592,7 @@ mod win {
                     changed
                 });
                 if dirty {
-                    redraw(hwnd);
+                    render();
                 }
                 LRESULT(0)
             }
@@ -506,49 +619,26 @@ mod win {
                 }
                 LRESULT(0)
             }
-            WM_PAINT => {
-                paint(hwnd);
-                LRESULT(0)
-            }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
 
-    unsafe fn paint(hwnd: HWND) {
-        let mut ps = PAINTSTRUCT::default();
-        let _ = BeginPaint(hwnd, &mut ps);
-        DLG.with_borrow_mut(|slot| {
-            if let Some(d) = slot.as_mut().filter(|d| d.hwnd == hwnd) {
-                if d.d2d.is_none() {
-                    d.d2d = d2d_init(d).ok();
-                }
-                let sel = if d.mouse_last { d.hover } else { d.kb };
-                if let Some(x) = &d.d2d {
-                    if draw(x, &d.panel, &d.entries, sel).is_err() {
-                        d.d2d = None; // device lost: rebuild on the next frame
-                    }
-                }
-            }
-        });
-        let _ = EndPaint(hwnd, &ps);
-    }
-
     unsafe fn d2d_init(d: &Dlg) -> windows::core::Result<D2d> {
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let (w, h) = d.panel.size();
-        let scale = match d.panel {
-            Panel::Row(l) => l.scale,
-            Panel::List(l) => l.scale,
-        };
-        let rt = factory.CreateHwndRenderTarget(
-            &D2D1_RENDER_TARGET_PROPERTIES::default(),
-            &D2D1_HWND_RENDER_TARGET_PROPERTIES {
-                hwnd: d.hwnd,
-                pixelSize: D2D_SIZE_U { width: w as u32, height: h as u32 },
-                presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+        let rt = factory.CreateDCRenderTarget(&D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
             },
-        )?;
-        let brush = rt.CreateSolidColorBrush(&TEXT, None)?;
+            dpiX: 96.0,
+            dpiY: 96.0,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        })?;
+        // ClearType needs an opaque backdrop; grayscale AA works on alpha.
+        let _ = rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        let brush = rt.CreateSolidColorBrush(&d.pal.text, None)?;
         let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
         let text = dwrite.CreateTextFormat(
             w!("Segoe UI"),
@@ -556,11 +646,42 @@ mod win {
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            14.0 * scale,
+            14.0 * d.panel.scale(),
             w!("en-us"),
         )?;
         text.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
         text.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+
+        // The layered-window surface: a premultiplied top-down DIB.
+        let (w, h) = d.panel.size();
+        let dc = CreateCompatibleDC(None);
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let bmp = match CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(bmp) => bmp,
+            Err(e) => {
+                let _ = DeleteDC(dc);
+                return Err(e);
+            }
+        };
+        SelectObject(dc, bmp.into());
+        if let Err(e) = rt.BindDC(dc, &RECT { left: 0, top: 0, right: w, bottom: h }) {
+            let _ = DeleteDC(dc);
+            let _ = DeleteObject(bmp.into());
+            return Err(e);
+        }
+
         let props = D2D1_BITMAP_PROPERTIES {
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -585,11 +706,15 @@ mod win {
                 })
             })
             .collect();
-        Ok(D2d { rt, brush, text, bitmaps })
+        Ok(D2d { rt, dc, bmp, brush, text, bitmaps })
     }
 
     fn rect(r: [f32; 4]) -> D2D_RECT_F {
         D2D_RECT_F { left: r[0], top: r[1], right: r[2], bottom: r[3] }
+    }
+
+    fn rounded(r: [f32; 4], radius: f32) -> D2D1_ROUNDED_RECT {
+        D2D1_ROUNDED_RECT { rect: rect(r), radiusX: radius, radiusY: radius }
     }
 
     unsafe fn draw(
@@ -597,30 +722,36 @@ mod win {
         panel: &Panel,
         entries: &[Entry],
         sel: usize,
+        pal: &Palette,
     ) -> windows::core::Result<()> {
+        let s = panel.scale();
+        let (w, h) = panel.size();
         x.rt.BeginDraw();
-        x.rt.Clear(Some(&BG));
+        x.rt.Clear(Some(&CLEAR));
+        // The panel itself: rounded corners with real alpha outside.
+        x.brush.SetColor(&pal.bg);
+        x.rt.FillRoundedRectangle(
+            &rounded([0.0, 0.0, w as f32, h as f32], RADIUS * s),
+            &x.brush,
+        );
         match panel {
-            Panel::Row(l) => draw_row(x, l, entries, sel),
-            Panel::List(l) => draw_list(x, l, entries, sel),
+            Panel::Row(l) => draw_row(x, l, entries, sel, pal),
+            Panel::List(l) => draw_list(x, l, entries, sel, pal),
         }
         x.rt.EndDraw(None, None)
     }
 
-    unsafe fn draw_row(x: &D2d, l: &Layout, entries: &[Entry], sel: usize) {
+    unsafe fn draw_row(x: &D2d, l: &Layout, entries: &[Entry], sel: usize, pal: &Palette) {
         let radius = 10.0 * l.scale;
-        x.brush.SetColor(&HILITE);
-        x.rt.FillRoundedRectangle(
-            &D2D1_ROUNDED_RECT { rect: rect(l.cell(sel)), radiusX: radius, radiusY: radius },
-            &x.brush,
-        );
+        x.brush.SetColor(&pal.hilite);
+        x.rt.FillRoundedRectangle(&rounded(l.cell(sel), radius), &x.brush);
         for (i, bitmap) in x.bitmaps.iter().enumerate() {
-            draw_icon(x, bitmap, l.icon(i), radius);
+            draw_icon(x, bitmap, l.icon(i), radius, pal);
         }
         if l.show_name {
             if let Some(entry) = entries.get(sel) {
                 let _ = x.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                x.brush.SetColor(&TEXT);
+                x.brush.SetColor(&pal.text);
                 x.rt.DrawText(
                     &entry.name,
                     &x.text,
@@ -633,17 +764,14 @@ mod win {
         }
     }
 
-    unsafe fn draw_list(x: &D2d, l: &ListLayout, entries: &[Entry], sel: usize) {
+    unsafe fn draw_list(x: &D2d, l: &ListLayout, entries: &[Entry], sel: usize, pal: &Palette) {
         let radius = 8.0 * l.scale;
-        x.brush.SetColor(&HILITE);
-        x.rt.FillRoundedRectangle(
-            &D2D1_ROUNDED_RECT { rect: rect(l.row(sel)), radiusX: radius, radiusY: radius },
-            &x.brush,
-        );
+        x.brush.SetColor(&pal.hilite);
+        x.rt.FillRoundedRectangle(&rounded(l.row(sel), radius), &x.brush);
         let _ = x.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         for (i, entry) in entries.iter().enumerate() {
-            draw_icon(x, &x.bitmaps[i], l.icon(i), 6.0 * l.scale);
-            x.brush.SetColor(&TEXT);
+            draw_icon(x, &x.bitmaps[i], l.icon(i), 6.0 * l.scale, pal);
+            x.brush.SetColor(&pal.text);
             x.rt.DrawText(
                 &entry.name,
                 &x.text,
@@ -652,7 +780,7 @@ mod win {
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
-            x.brush.SetColor(&DIM);
+            x.brush.SetColor(&pal.dim);
             x.rt.DrawText(
                 &entry.title,
                 &x.text,
@@ -664,7 +792,13 @@ mod win {
         }
     }
 
-    unsafe fn draw_icon(x: &D2d, bitmap: &Option<ID2D1Bitmap>, r: [f32; 4], radius: f32) {
+    unsafe fn draw_icon(
+        x: &D2d,
+        bitmap: &Option<ID2D1Bitmap>,
+        r: [f32; 4],
+        radius: f32,
+        pal: &Palette,
+    ) {
         match bitmap {
             Some(b) => x.rt.DrawBitmap(
                 b,
@@ -674,11 +808,8 @@ mod win {
                 None,
             ),
             None => {
-                x.brush.SetColor(&PLACEHOLDER);
-                x.rt.FillRoundedRectangle(
-                    &D2D1_ROUNDED_RECT { rect: rect(r), radiusX: radius, radiusY: radius },
-                    &x.brush,
-                );
+                x.brush.SetColor(&pal.placeholder);
+                x.rt.FillRoundedRectangle(&rounded(r, radius), &x.brush);
             }
         }
     }

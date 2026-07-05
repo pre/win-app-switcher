@@ -111,9 +111,12 @@ Next/Prev event and `activate candidate i/N` on commit.
 ## M3 — App switcher UI
 
 ### Dialog basics
-1. Several apps open: WIN+TAB → a dark rounded panel appears centered on the
+1. Several apps open: WIN+TAB → a rounded panel (taskbar gray: light when
+   Windows is in light mode, dark in dark mode) appears centered on the
    monitor under the mouse, one icon per app, most-recently-used first.
    The **second** icon is highlighted and its app name is shown underneath.
+   Corners are visibly rounded with a soft edge (drawn with alpha, not the
+   Win11 DWM rounding) and the panel casts a small drop shadow.
 2. Quick WIN+TAB tap still switches instantly to the previous app (the
    dialog may only flash briefly).
 3. Hold WIN: TAB advances the highlight, SHIFT+TAB goes back, Right/Left
@@ -151,6 +154,9 @@ Next/Prev event and `activate candidate i/N` on commit.
 17. `show_selected_name = false` → no name strip, panel is shorter.
 18. `dialog_monitor = "primary"` → dialog always opens on the primary
     monitor regardless of the mouse.
+19. `theme = "dark"` / `"light"` force the palettes; default `auto` follows
+    the Windows system (taskbar) light/dark setting. Toggle Windows dark
+    mode: the next dialog picks up the new color without a restart.
 
 ## M4 — Window switcher UI
 
