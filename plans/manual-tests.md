@@ -34,7 +34,37 @@ Build: `cargo xwin build --release --target x86_64-pc-windows-msvc`, copy
     problem, app still starts and works with defaults.
 13. Set `scale = 99` → warning dialog about the range, app still starts.
 
-## M1 — Hook (later)
+## M1 — Hook
+
+Use a **debug** build for the event log (it keeps a console window):
+`cargo xwin build --target x86_64-pc-windows-msvc`. Run it from a terminal;
+each hook event prints as `hook event: Some(AppNext)` etc. Repeat the key
+tests with the release build to confirm it behaves the same (minus the log).
+
+### Swallowing & events
+1. WIN+TAB → Task View does **not** open; console prints `AppNext`.
+   Hold WIN, tap TAB repeatedly → one `AppNext` per tap (key repeat too).
+2. WIN+SHIFT+TAB → `AppPrev`.
+3. WIN+§ → `WinNext`; WIN+SHIFT+§ → `WinPrev`. Nothing is typed anywhere.
+4. Release WIN after any of the above → `Commit`, and the **Start menu does
+   not open** (the M1 headline check — try fast taps and slow holds).
+5. During a session (WIN held after TAB), press ESC → `Cancel`; releasing WIN
+   afterwards prints nothing and Start menu stays closed.
+6. During a WIN+TAB session, press Q → `CloseApp`; Windows Search does not open.
+7. During a WIN+§ session, press TAB → swallowed, no event, no Task View.
+
+### Pass-through unaffected
+8. WIN alone (tap) → Start menu opens normally.
+9. WIN+L locks, WIN+D shows desktop, WIN+E opens Explorer, WIN+R opens Run.
+10. Plain TAB, §, Q, ESC in a text editor behave completely normally.
+
+### No stuck keys
+11. After a dozen mixed sessions (commit, cancel, quick taps), type in an
+    editor: no phantom modifiers — letters are lowercase, TAB indents, no
+    stuck WIN (press E: Explorer must NOT open).
+12. Quit from the tray → WIN+TAB opens Task View again (hook gone with process).
+
+## M2 — Core switching (later)
 ## M2 — Core switching (later)
 ## M3 — App switcher UI (later)
 ## M4 — Window switcher UI (later)

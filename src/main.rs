@@ -1,6 +1,10 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
+// Debug builds keep the console so hook events are visible with println!.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod config;
+// Pure state machine is cross-platform for `cargo test`; only tests use it off-Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod hook;
 
 #[cfg(not(windows))]
 fn main() {
@@ -33,7 +37,10 @@ mod win {
         DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, OUT_DEFAULT_PRECIS, TRANSPARENT,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+    use windows::Win32::System::Threading::{
+        CreateMutexW, GetCurrentProcess, SetPriorityClass, WaitForSingleObject,
+        REALTIME_PRIORITY_CLASS,
+    };
     use windows::Win32::UI::Shell::{
         Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
     };
@@ -102,6 +109,12 @@ mod win {
             }
         }
 
+        // Switching must stay fast under full CPU load. REALTIME needs
+        // elevation; unelevated the OS silently grants HIGH instead.
+        unsafe {
+            let _ = SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
+        }
+
         // M0 only proves the config loads; later milestones consume it.
         let _config = match config_path().and_then(|p| Config::load(&p)) {
             Ok(c) => c,
@@ -158,6 +171,8 @@ mod win {
                 .ok()
                 .context("Shell_NotifyIconW")?;
 
+            crate::hook::start(hwnd);
+
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 let _ = TranslateMessage(&msg);
@@ -181,6 +196,12 @@ mod win {
         match msg {
             WM_TRAY if lparam.0 as u32 == WM_RBUTTONUP => {
                 show_tray_menu(hwnd);
+                LRESULT(0)
+            }
+            // M1: the hook's events arrive here; M2 starts acting on them.
+            m if m == crate::hook::WM_SWITCHER => {
+                #[cfg(debug_assertions)]
+                println!("hook event: {:?}", crate::hook::Event::from_wparam(wparam.0));
                 LRESULT(0)
             }
             WM_DESTROY => {
