@@ -116,7 +116,8 @@ Next/Prev event and `activate candidate i/N` on commit.
    monitor under the mouse, one icon per app, most-recently-used first.
    The **second** icon is highlighted and its app name is shown underneath.
    Corners are visibly rounded with a soft edge (drawn with alpha, not the
-   Win11 DWM rounding) and the panel casts a small drop shadow.
+   Win11 DWM rounding), no drop shadow, and the panel has a thin darkened
+   outline like the standard alt-tab dialog.
 2. Quick WIN+TAB tap still switches instantly to the previous app (the
    dialog may only flash briefly).
 3. Hold WIN: TAB advances the highlight, SHIFT+TAB goes back, Right/Left

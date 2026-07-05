@@ -210,13 +210,14 @@ mod win {
     use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, LoadCursorW, PostMessageW,
-        RegisterClassW, SetWindowPos, ShowWindow, UpdateLayeredWindow, CS_DROPSHADOW, IDC_ARROW,
-        SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEMOVE, WNDCLASSW,
-        WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        RegisterClassW, SetWindowPos, ShowWindow, UpdateLayeredWindow, IDC_ARROW, SWP_NOACTIVATE,
+        SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEMOVE, WNDCLASSW, WS_EX_LAYERED,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     struct Palette {
         bg: D2D1_COLOR_F,
+        border: D2D1_COLOR_F,
         hilite: D2D1_COLOR_F,
         placeholder: D2D1_COLOR_F,
         text: D2D1_COLOR_F,
@@ -233,6 +234,7 @@ mod win {
     /// Panel backgrounds match the Windows taskbar grays (#202020 / #EEEEEE).
     const DARK: Palette = Palette {
         bg: D2D1_COLOR_F { r: 0.125, g: 0.125, b: 0.125, a: 1.0 },
+        border: white(0.16),
         hilite: white(0.16),
         placeholder: white(0.08),
         text: white(0.9),
@@ -240,6 +242,7 @@ mod win {
     };
     const LIGHT: Palette = Palette {
         bg: D2D1_COLOR_F { r: 0.933, g: 0.933, b: 0.933, a: 1.0 },
+        border: black(0.2),
         hilite: black(0.12),
         placeholder: black(0.06),
         text: black(0.85),
@@ -533,7 +536,6 @@ mod win {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             let wc = WNDCLASSW {
-                style: CS_DROPSHADOW,
                 lpfnWndProc: Some(wndproc),
                 hInstance: GetModuleHandleW(None).unwrap_or_default().into(),
                 lpszClassName: DLG_CLASS,
@@ -728,11 +730,23 @@ mod win {
         let (w, h) = panel.size();
         x.rt.BeginDraw();
         x.rt.Clear(Some(&CLEAR));
-        // The panel itself: rounded corners with real alpha outside.
+        // The panel itself: rounded corners with real alpha outside, and a
+        // thin darkened outline like the standard alt-tab dialog.
         x.brush.SetColor(&pal.bg);
         x.rt.FillRoundedRectangle(
             &rounded([0.0, 0.0, w as f32, h as f32], RADIUS * s),
             &x.brush,
+        );
+        let bw = s.max(1.0); // 1 px outline, scaled
+        x.brush.SetColor(&pal.border);
+        x.rt.DrawRoundedRectangle(
+            &rounded(
+                [bw / 2.0, bw / 2.0, w as f32 - bw / 2.0, h as f32 - bw / 2.0],
+                RADIUS * s - bw / 2.0,
+            ),
+            &x.brush,
+            bw,
+            None,
         );
         match panel {
             Panel::Row(l) => draw_row(x, l, entries, sel, pal),
