@@ -64,11 +64,14 @@ impl Event {
 pub struct State {
     pub mode: Mode,
     pub win_down: bool,
+    /// Q held down — its autorepeat must not close one app per repeat.
+    pub q_down: bool,
 }
 
 pub const IDLE: State = State {
     mode: Mode::None,
     win_down: false,
+    q_down: false,
 };
 
 pub struct Actions {
@@ -84,6 +87,12 @@ const PASS: Actions = Actions {
 };
 
 pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
+    // Tracked across sessions: a Q already held when a session starts (or
+    // held over a session boundary) is not a fresh press either.
+    let q_repeat = key == Key::Q && !up && s.q_down;
+    if key == Key::Q {
+        s.q_down = !up;
+    }
     match (key, up) {
         (Key::Win, false) => {
             s.win_down = true;
@@ -132,9 +141,11 @@ pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
             }
         }
         // Swallow Q both ways during any session so WIN+Q never opens Search.
+        // One CloseApp per physical press: autorepeat closes nothing more
+        // until a key-up is seen.
         (Key::Q, up) if s.mode != Mode::None => Actions {
             swallow: true,
-            event: (!up && s.mode == Mode::App).then_some(Event::CloseApp),
+            event: (!up && !q_repeat && s.mode == Mode::App).then_some(Event::CloseApp),
             inject_dummy: false,
         },
         // Arrows move the selection (Left/Right in the app switcher, Up/Down
@@ -425,6 +436,7 @@ mod tests {
         step(&mut s, Key::Section, false, false);
         let a = step(&mut s, Key::Q, false, false);
         assert!(a.swallow && a.event.is_none(), "swallowed but no-op in win mode");
+        step(&mut s, Key::Q, true, false);
         step(&mut s, Key::Win, true, false);
 
         step(&mut s, Key::Win, false, false);
@@ -433,6 +445,29 @@ mod tests {
         assert_eq!(a.event, Some(Event::CloseApp));
         let a = step(&mut s, Key::Q, true, false);
         assert!(a.swallow && a.event.is_none());
+    }
+
+    #[test]
+    fn q_autorepeat_closes_only_one_app() {
+        let mut s = IDLE;
+        step(&mut s, Key::Win, false, false);
+        step(&mut s, Key::Tab, false, false);
+        assert_eq!(step(&mut s, Key::Q, false, false).event, Some(Event::CloseApp));
+        // Held Q autorepeats: swallowed, but nothing more closes.
+        let a = step(&mut s, Key::Q, false, false);
+        assert!(a.swallow && a.event.is_none());
+        // Release and press again: the next app can be closed.
+        step(&mut s, Key::Q, true, false);
+        assert_eq!(step(&mut s, Key::Q, false, false).event, Some(Event::CloseApp));
+
+        // Q kept held over a session boundary is not a fresh press either.
+        step(&mut s, Key::Win, true, false);
+        step(&mut s, Key::Win, false, false);
+        step(&mut s, Key::Tab, false, false);
+        let a = step(&mut s, Key::Q, false, false);
+        assert!(a.swallow && a.event.is_none());
+        step(&mut s, Key::Q, true, false);
+        assert_eq!(step(&mut s, Key::Q, false, false).event, Some(Event::CloseApp));
     }
 
     #[test]
