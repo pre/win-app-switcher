@@ -1,6 +1,17 @@
-/// Stamp the binary with the git commit ("4187cd2" / "4187cd2-dirty") so the
-/// running build is identifiable from the tray tooltip and the debug console.
+/// Stamp the binary with the git commit ("ab1c4c38" / "ab1c4c38-dirty") so
+/// the running build is identifiable from the tray tooltip and the debug
+/// console.
 fn main() {
+    // Re-stamp when sources change (dirty flag) and when HEAD moves (a
+    // commit) — listing paths here replaces cargo's rerun-on-any-change.
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(reference) = head.strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=.git/{}", reference.trim());
+        }
+    }
     let hash = std::process::Command::new("git")
         .args(["describe", "--always", "--dirty", "--abbrev=8"])
         .output()
