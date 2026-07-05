@@ -345,7 +345,7 @@ mod win {
             .map(|g| Entry {
                 name: g.name.encode_utf16().collect(),
                 title: Vec::new(),
-                icon: crate::apps::icon_bgra(&g.exe, px),
+                icon: crate::apps::icon_bgra(&g.icon, px),
             })
             .collect();
         let panel = Panel::Row(Layout {
@@ -360,13 +360,13 @@ mod win {
     pub fn show_list(
         main_hwnd: HWND,
         name: &str,
-        exe: &str,
+        icon_src: &str,
         titles: &[String],
         kb: usize,
         cfg: &Config,
     ) {
         let px = icon_px(cfg);
-        let icon = crate::apps::icon_bgra(exe, px);
+        let icon = crate::apps::icon_bgra(icon_src, px);
         let entries = titles
             .iter()
             .map(|t| Entry {

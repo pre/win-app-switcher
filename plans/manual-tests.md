@@ -131,7 +131,7 @@ Next/Prev event and `activate candidate i/N` on commit.
 5. ESC closes the dialog, focus stays where it was.
 6. The dialog itself never appears as an entry in the icon row.
 7. Icons look correct for Win32 apps; an app without an extractable icon
-   shows a dim placeholder square (UWP icon polish is M5).
+   shows a dim placeholder square (UWP icons: see M5).
 
 ### Mouse
 8. Hovering an icon moves the highlight to it; releasing WIN then activates
@@ -185,4 +185,29 @@ Next/Prev event and `activate candidate i/N` on commit.
 9. Left/Right arrows during the list pass through (WIN+Left snap fires);
    Up/Down during the app switcher pass through (WIN+Up maximize fires).
 
-## M5 — Polish (later)
+## M5 — Polish
+
+### Desktop filter (needs 2+ virtual desktops)
+1. Default (`desktop_filter = "current"`): a window on another virtual
+   desktop appears in neither WIN+TAB nor the WIN+§ list.
+2. `desktop_filter = "all"`: apps on other desktops appear in WIN+TAB and
+   the WIN+§ list includes the app's windows on other desktops; activating
+   one switches to that desktop.
+3. With `"all"`, a suspended UWP app (opened, then minimized long ago) does
+   **not** appear as a ghost entry.
+
+### UWP icons
+4. Open Settings and Calculator: both show their real icons in the WIN+TAB
+   row and in the WIN+§ list header — not the dim placeholder.
+
+### Unelevated degradation
+5. Start the exe normally (no admin): a tray balloon warns once about
+   running without administrator rights; switching still works.
+6. Focus an elevated window (admin terminal): WIN+TAB does nothing while it
+   has focus — expected — and works again when focus moves elsewhere.
+7. Start elevated: no balloon.
+
+### Task Scheduler autostart
+8. The README `schtasks` recipe: after logging out and in, the switcher is
+   running elevated (Task Manager shows "elevated: yes") with no UAC prompt
+   and no balloon.

@@ -28,15 +28,15 @@ fn main() {
 
 #[cfg(windows)]
 mod win {
-    use crate::config::Config;
+    use crate::config::{Config, DesktopFilter};
     use anyhow::{ensure, Context, Result};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::OnceLock;
     use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{
-        COLORREF, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT,
-        WAIT_ABANDONED, WAIT_OBJECT_0, WPARAM,
+        CloseHandle, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
+        POINT, RECT, WAIT_ABANDONED, WAIT_OBJECT_0, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
         CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
@@ -44,14 +44,18 @@ mod win {
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
         DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, OUT_DEFAULT_PRECIS, TRANSPARENT,
     };
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::{
-        CreateMutexW, GetCurrentProcess, SetPriorityClass, WaitForSingleObject,
+        CreateMutexW, GetCurrentProcess, OpenProcessToken, SetPriorityClass, WaitForSingleObject,
         REALTIME_PRIORITY_CLASS,
     };
     use windows::Win32::UI::Shell::{
-        Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+        Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING, NIM_ADD,
+        NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, ChangeWindowMessageFilterEx, CreateIconIndirect, CreatePopupMenu,
@@ -213,13 +217,32 @@ mod win {
                 hIcon: tray_icon().context("tray icon")?,
                 ..Default::default()
             };
-            let tip = concat!("win-app-switcher ", env!("GIT_HASH"));
-            for (dst, src) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
-                *dst = src;
-            }
+            copy_wstr(&mut nid.szTip, concat!("win-app-switcher ", env!("GIT_HASH")));
             Shell_NotifyIconW(NIM_ADD, &nid)
                 .ok()
                 .context("Shell_NotifyIconW")?;
+
+            // Unelevated everything still works, just degraded: priority fell
+            // back to HIGH above, and WIN shortcuts pass through while an
+            // elevated window has focus. Warn once, don't block.
+            if !is_elevated() {
+                let mut nid = NOTIFYICONDATAW {
+                    cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                    hWnd: hwnd,
+                    uID: TRAY_ID,
+                    uFlags: NIF_INFO,
+                    dwInfoFlags: NIIF_WARNING,
+                    ..Default::default()
+                };
+                copy_wstr(&mut nid.szInfoTitle, "Running without administrator rights");
+                copy_wstr(
+                    &mut nid.szInfo,
+                    "Switching works, but may lag under heavy load and pauses while \
+                     an elevated window has focus. See README \u{201c}Start at \
+                     login\u{201d} for elevated autostart without UAC prompts.",
+                );
+                let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+            }
 
             crate::hook::start(hwnd);
 
@@ -235,6 +258,36 @@ mod win {
     fn config_path() -> Result<std::path::PathBuf> {
         let exe = std::env::current_exe().context("current_exe")?;
         Ok(exe.with_file_name("config.toml"))
+    }
+
+    /// Copy into a fixed-size UTF-16 field, truncating, keeping a final NUL.
+    fn copy_wstr(dst: &mut [u16], src: &str) {
+        let n = dst.len() - 1;
+        for (dst, src) in dst[..n].iter_mut().zip(src.encode_utf16()) {
+            *dst = src;
+        }
+    }
+
+    /// TokenElevation of our own token. On query failure claim elevated:
+    /// better to skip the warning than to nag falsely.
+    fn is_elevated() -> bool {
+        unsafe {
+            let mut token = HANDLE::default();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+                return true;
+            }
+            let mut elevation = TOKEN_ELEVATION::default();
+            let mut len = 0u32;
+            let res = GetTokenInformation(
+                token,
+                TokenElevation,
+                Some(&mut elevation as *mut _ as *mut _),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            );
+            let _ = CloseHandle(token);
+            res.is_err() || elevation.TokenIsElevated != 0
+        }
     }
 
     unsafe extern "system" fn wndproc(
@@ -300,7 +353,8 @@ mod win {
                 }
                 match slot {
                     None => {
-                        let groups = crate::apps::app_groups();
+                        let all = cfg.desktop_filter == DesktopFilter::All;
+                        let groups = crate::apps::app_groups(all);
                         if groups.is_empty() {
                             return;
                         }
@@ -321,8 +375,10 @@ mod win {
             }
             WinNext | WinPrev => {
                 if slot.is_none() {
-                    let (exe, windows) =
-                        crate::apps::foreground_app_windows(cfg.restore_minimized);
+                    let (exe, windows) = crate::apps::foreground_app_windows(
+                        cfg.restore_minimized,
+                        cfg.desktop_filter == DesktopFilter::All,
+                    );
                     #[cfg(debug_assertions)]
                     println!("win session: {} candidates", windows.len());
                     // The list dialog appears only if WIN is still held after
@@ -410,9 +466,10 @@ mod win {
                     return;
                 }
                 let name = crate::apps::display_name(exe);
+                let icon = crate::apps::icon_source(windows[0], exe);
                 let titles: Vec<String> =
                     windows.iter().map(|&w| crate::apps::window_title(w)).collect();
-                crate::ui::show_list(main_hwnd, &name, exe, &titles, *index, &cfg);
+                crate::ui::show_list(main_hwnd, &name, &icon, &titles, *index, &cfg);
             }
         });
     }

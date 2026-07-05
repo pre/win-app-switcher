@@ -36,7 +36,9 @@ mod win {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use windows::core::{w, BOOL, PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, SIZE, WPARAM};
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_SUCCESS, HWND, LPARAM, LRESULT, SIZE, WPARAM,
+    };
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, BITMAPINFO, BITMAPINFOHEADER,
@@ -45,13 +47,15 @@ mod win {
     use windows::Win32::Storage::FileSystem::{
         GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
     };
-    use windows::Win32::System::Com::IBindCtx;
+    use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
+    use windows::Win32::System::Com::{CoCreateInstance, IBindCtx, CLSCTX_ALL};
     use windows::Win32::System::Threading::{
         AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
         PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::Shell::{
-        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY,
+        IShellItemImageFactory, IVirtualDesktopManager, SHCreateItemFromParsingName,
+        VirtualDesktopManager, SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetForegroundWindow, GetParent,
@@ -75,40 +79,78 @@ mod win {
     ];
 
     /// Eligible top-level windows in z-order (topmost first), each with its
-    /// process executable path — the grouping key.
-    pub fn eligible_windows() -> Vec<(HWND, String)> {
+    /// process executable path — the grouping key. With `all_desktops`,
+    /// windows on other virtual desktops are included too.
+    pub fn eligible_windows(all_desktops: bool) -> Vec<(HWND, String)> {
+        struct Ctx {
+            list: Vec<(HWND, String)>,
+            vdm: Option<IVirtualDesktopManager>,
+        }
         unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
-            let list = &mut *(lparam.0 as *mut Vec<(HWND, String)>);
-            if let Some(exe) = eligible_exe(hwnd) {
-                list.push((hwnd, exe));
+            let ctx = &mut *(lparam.0 as *mut Ctx);
+            if let Some(exe) = eligible_exe(hwnd, ctx.vdm.as_ref()) {
+                ctx.list.push((hwnd, exe));
             }
             true.into()
         }
-        let mut list: Vec<(HWND, String)> = Vec::new();
+        let mut ctx = Ctx {
+            list: Vec::new(),
+            // If the manager cannot be created, "all" degrades to "current".
+            vdm: all_desktops
+                .then(|| unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL).ok() })
+                .flatten(),
+        };
         unsafe {
-            let _ = EnumWindows(Some(collect), LPARAM(&mut list as *mut _ as isize));
+            let _ = EnumWindows(Some(collect), LPARAM(&mut ctx as *mut _ as isize));
         }
-        list
+        ctx.list
     }
 
     /// One running application for the app switcher: display name, icon key
     /// and all its windows in z-order (members[0] is the app's topmost).
     pub struct AppGroup {
-        pub exe: String,
         pub name: String,
+        /// Shell parsing name for [`icon_bgra`].
+        pub icon: String,
         pub windows: Vec<HWND>,
     }
 
     /// One group per running app, most-recently-used first.
-    pub fn app_groups() -> Vec<AppGroup> {
-        group_by_key(eligible_windows())
+    pub fn app_groups(all_desktops: bool) -> Vec<AppGroup> {
+        group_by_key(eligible_windows(all_desktops))
             .into_iter()
             .map(|(exe, windows)| AppGroup {
                 name: display_name(&exe),
-                exe,
+                icon: icon_source(windows[0], &exe),
                 windows,
             })
             .collect()
+    }
+
+    /// Shell parsing name whose icon represents the app: packaged (UWP)
+    /// processes resolve through their `shell:AppsFolder` entry — their exe
+    /// under WindowsApps yields a blank icon — all others through the exe
+    /// path itself.
+    pub fn icon_source(hwnd: HWND, exe: &str) -> String {
+        unsafe { app_user_model_id(hwnd) }
+            .map(|id| format!("shell:AppsFolder\\{id}"))
+            .unwrap_or_else(|| exe.to_string())
+    }
+
+    /// AUMID of the process owning the window; `None` for plain Win32 apps.
+    unsafe fn app_user_model_id(hwnd: HWND) -> Option<String> {
+        let proc = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            window_pid(hwnd, &class_name(hwnd)),
+        )
+        .ok()?;
+        let mut buf = [0u16; 130]; // APPLICATION_USER_MODEL_ID_MAX_LENGTH
+        let mut len = buf.len() as u32;
+        let res = GetApplicationUserModelId(proc, &mut len, Some(PWSTR(buf.as_mut_ptr())));
+        let _ = CloseHandle(proc);
+        // len counts the terminating NUL.
+        (res == ERROR_SUCCESS && len > 1).then(|| String::from_utf16_lossy(&buf[..len as usize - 1]))
     }
 
     /// FileDescription from the exe's version resource ("Visual Studio Code"),
@@ -166,10 +208,9 @@ mod win {
         (!name.is_empty()).then_some(name)
     }
 
-    /// Premultiplied BGRA pixels (px × px) of the exe's shell icon, cached per
-    /// path for the process lifetime — cold shell extraction can take ~100 ms.
-    /// ponytail: plain exe-path lookup; UWP apps may need the
-    /// shell:AppsFolder\<AUMID> route, verify and wire in M5.
+    /// Premultiplied BGRA pixels (px × px) of the shell icon behind a parsing
+    /// name (exe path or `shell:AppsFolder` entry, see [`icon_source`]),
+    /// cached for the process lifetime — cold extraction can take ~100 ms.
     pub fn icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
         thread_local! {
             static CACHE: RefCell<HashMap<String, Option<Vec<u8>>>> =
@@ -222,21 +263,22 @@ mod win {
     /// (foreground first). With `include_minimized` off, minimized windows
     /// are skipped — without restore-on-activate a minimized window cannot
     /// visibly take focus.
-    pub fn foreground_app_windows(include_minimized: bool) -> (String, Vec<HWND>) {
+    pub fn foreground_app_windows(include_minimized: bool, all_desktops: bool) -> (String, Vec<HWND>) {
         unsafe {
             // The foreground window itself may be ineligible (e.g. a child
             // dialog); walk up until an eligible window names the app.
+            // The foreground window is on the current desktop by definition.
             let mut fg = GetForegroundWindow();
             let exe = loop {
                 if fg.0.is_null() {
                     return (String::new(), Vec::new());
                 }
-                if let Some(exe) = eligible_exe(fg) {
+                if let Some(exe) = eligible_exe(fg, None) {
                     break exe;
                 }
                 fg = GetParent(fg).unwrap_or_default();
             };
-            let windows = eligible_windows()
+            let windows = eligible_windows(all_desktops)
                 .into_iter()
                 .filter(|(w, e)| *e == exe && (include_minimized || !IsIconic(*w).as_bool()))
                 .map(|(w, _)| w)
@@ -291,8 +333,10 @@ mod win {
     }
 
     /// Port of AAS `IsEligibleWindow`: `Some(exe path)` if the window belongs
-    /// in a switcher, `None` otherwise.
-    unsafe fn eligible_exe(hwnd: HWND) -> Option<String> {
+    /// in a switcher, `None` otherwise. A desktop manager (`vdm`) keeps
+    /// windows that are cloaked only because they live on another virtual
+    /// desktop (desktop_filter = "all").
+    unsafe fn eligible_exe(hwnd: HWND, vdm: Option<&IVirtualDesktopManager>) -> Option<String> {
         if hwnd == GetShellWindow() {
             return None; // the desktop
         }
@@ -317,8 +361,6 @@ mod win {
         }
         // Cloaked = not really on screen: suspended UWP hosts and windows on
         // other virtual desktops.
-        // ponytail: cloak check doubles as desktop_filter="current"; honoring
-        // desktop_filter="all" needs IVirtualDesktopManager, wire it in M5.
         let mut cloaked: u32 = 0;
         let _ = DwmGetWindowAttribute(
             hwnd,
@@ -327,7 +369,16 @@ mod win {
             std::mem::size_of::<u32>() as u32,
         );
         if cloaked != 0 {
-            return None;
+            // Cloaked on the current desktop (suspended UWP host) is never
+            // eligible; on another desktop it is, when the filter is "all".
+            let other_desktop = vdm.is_some_and(|v| {
+                v.IsWindowOnCurrentVirtualDesktop(hwnd)
+                    .map(|on| !on.as_bool())
+                    .unwrap_or(false)
+            });
+            if !other_desktop {
+                return None;
+            }
         }
         exe_path(window_pid(hwnd, &class))
     }

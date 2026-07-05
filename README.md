@@ -25,3 +25,21 @@ How it differs from the built-in alt-tab:
 | `WIN+Q` | Close all windows of the selected application |
 | `ESC` | Cancel |
 
+## Start at login
+
+The switcher works as a normal user, with two degradations (a tray balloon
+warns about them at startup): process priority falls from REALTIME to HIGH,
+so switching may lag under full CPU load, and WIN shortcuts pass through
+while an elevated window (admin terminal, installer) has focus — Windows
+hides keystrokes in elevated windows from unelevated programs.
+
+For the full experience, start it elevated at every login without a UAC
+prompt using a Task Scheduler logon task. In an elevated prompt:
+
+```
+schtasks /Create /TN win-app-switcher /TR "C:\path\to\win-app-switcher.exe" /SC ONLOGON /RL HIGHEST /F
+```
+
+Or in the Task Scheduler GUI: Create Task → check **Run with highest
+privileges** → Triggers → **At log on**.
+
