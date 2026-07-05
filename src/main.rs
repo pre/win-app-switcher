@@ -115,6 +115,8 @@ mod win {
     }
 
     pub fn run() -> Result<()> {
+        #[cfg(debug_assertions)]
+        println!("win-app-switcher build {}", env!("GIT_HASH"));
         let exit_msg = unsafe { RegisterWindowMessageW(w!("win-app-switcher.exit")) };
         ensure!(exit_msg != 0, "RegisterWindowMessageW failed");
         EXIT_MSG.store(exit_msg, Ordering::Relaxed);
@@ -203,7 +205,8 @@ mod win {
                 hIcon: tray_icon().context("tray icon")?,
                 ..Default::default()
             };
-            for (dst, src) in nid.szTip.iter_mut().zip("win-app-switcher".encode_utf16()) {
+            let tip = concat!("win-app-switcher ", env!("GIT_HASH"));
+            for (dst, src) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
                 *dst = src;
             }
             Shell_NotifyIconW(NIM_ADD, &nid)
