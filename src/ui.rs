@@ -210,7 +210,8 @@ mod win {
     use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, LoadCursorW, PostMessageW,
-        RegisterClassW, SetWindowPos, ShowWindow, UpdateLayeredWindow, IDC_ARROW, SWP_NOACTIVATE,
+        RegisterClassW, SetCursor, SetWindowPos, ShowWindow, UpdateLayeredWindow, IDC_ARROW,
+        SWP_NOACTIVATE,
         SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEMOVE, WNDCLASSW, WS_EX_LAYERED,
         WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
@@ -575,6 +576,9 @@ mod win {
     ) -> LRESULT {
         match msg {
             WM_MOUSEMOVE => {
+                // The mouse is captured, so the WM_SETCURSOR/class-cursor
+                // path never runs — set the arrow ourselves (as AAS does).
+                let _ = SetCursor(LoadCursorW(None, IDC_ARROW).ok());
                 let (x, y) = mouse_coords(lparam);
                 let dirty = DLG.with_borrow_mut(|slot| {
                     let Some(d) = slot.as_mut().filter(|d| d.hwnd == hwnd) else {
