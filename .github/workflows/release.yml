@@ -25,11 +25,25 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TAG: ${{ inputs.tag }}
+      # Bind-mount the docker caches from the workspace so actions/cache can
+      # persist them across runs (named volumes die with the runner).
+      CARGO_CACHE: ${{ github.workspace }}/.cache/cargo-registry
+      XWIN_CACHE: ${{ github.workspace }}/.cache/xwin
     steps:
       - uses: actions/checkout@v5
         with:
           # The draft has no tag yet; build exactly the commit it is pinned to.
           ref: ${{ inputs.sha }}
+      # The MSVC CRT/SDK download only changes when the xwin setup does.
+      - uses: actions/cache@v4
+        with:
+          path: .cache/xwin
+          key: xwin-${{ hashFiles('bin/build') }}
+      - uses: actions/cache@v4
+        with:
+          path: .cache/cargo-registry
+          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-
       - run: make docker-test
       - run: make docker-build
       - name: Attach assets to the draft

@@ -18,6 +18,10 @@ if [[ "${1:-build}" == "test" ]]; then
   exec cargo test
 fi
 
+# cargo-xwin downloads the CRT/SDK for x86_64 AND aarch64 by default; we
+# only link x86_64, so skip half the download.
+export XWIN_ARCH=x86_64
+
 ARCH="$(uname -m)" # x86_64 on the CI runner, aarch64 in Apple Silicon Docker
 curl -sSfL "https://github.com/rust-cross/cargo-xwin/releases/download/v${XWIN_VERSION}/cargo-xwin-v${XWIN_VERSION}.${ARCH}-unknown-linux-musl.tar.gz" |
   tar -xz -C /usr/local/bin cargo-xwin

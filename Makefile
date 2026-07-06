@@ -25,11 +25,15 @@ test:
 RUST_IMAGE ?= rust:1.96.1-bookworm
 
 # Release build / tests inside the pinned image. Named volumes cache crates
-# and the xwin-downloaded Windows SDK between runs.
+# and the xwin-downloaded Windows SDK between runs; CI overrides these with
+# absolute host paths (bind mounts) so actions/cache can persist them.
+CARGO_CACHE ?= win-app-switcher-cargo
+XWIN_CACHE ?= win-app-switcher-xwin
+
 docker-build docker-test:
 	docker run --rm -v "$(CURDIR)":/src -w /src \
-		-v win-app-switcher-cargo:/usr/local/cargo/registry \
-		-v win-app-switcher-xwin:/root/.cache/cargo-xwin \
+		-v "$(CARGO_CACHE)":/usr/local/cargo/registry \
+		-v "$(XWIN_CACHE)":/root/.cache/cargo-xwin \
 		$(RUST_IMAGE) bin/build $(@:docker-%=%)
 
 .PHONY: build debug test docker-build docker-test
