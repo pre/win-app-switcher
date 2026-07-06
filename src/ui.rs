@@ -194,7 +194,7 @@ mod win {
     use windows::Win32::Graphics::DirectWrite::{
         DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
         DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_GDI_CLASSIC,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
         DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
     };
@@ -776,7 +776,7 @@ mod win {
                     &rect(l.label(sel)),
                     &x.brush,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                    DWRITE_MEASURING_MODE_NATURAL,
+                    DWRITE_MEASURING_MODE_GDI_CLASSIC,
                 );
             }
         }
@@ -796,7 +796,7 @@ mod win {
                 &rect(l.name(i)),
                 &x.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                DWRITE_MEASURING_MODE_NATURAL,
+                DWRITE_MEASURING_MODE_GDI_CLASSIC,
             );
             x.brush.SetColor(&pal.dim);
             x.rt.DrawText(
@@ -805,7 +805,7 @@ mod win {
                 &rect(l.title(i)),
                 &x.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                DWRITE_MEASURING_MODE_NATURAL,
+                DWRITE_MEASURING_MODE_GDI_CLASSIC,
             );
         }
     }
