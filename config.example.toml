@@ -23,3 +23,6 @@
 # WIN+§ shows the window list only after this delay (ms).
 # A quicker tap switches windows with no UI.
 #dialog_delay_ms = 150
+
+# Check GitHub daily for a newer release and notify from the tray.
+#check_updates = true

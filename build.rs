@@ -12,6 +12,14 @@ fn main() {
             println!("cargo:rerun-if-changed=.git/{}", reference.trim());
         }
     }
+    // The release workflow sets RELEASE_TAG=vX.Y.Z (CI builds before the
+    // tag exists, so `git describe` can't see it). Dev builds leave it
+    // unset; an empty RELEASE_TAG disables the update check.
+    println!("cargo:rerun-if-env-changed=RELEASE_TAG");
+    println!(
+        "cargo:rustc-env=RELEASE_TAG={}",
+        std::env::var("RELEASE_TAG").unwrap_or_default()
+    );
     let hash = std::process::Command::new("git")
         .args(["describe", "--always", "--dirty", "--abbrev=8"])
         .output()

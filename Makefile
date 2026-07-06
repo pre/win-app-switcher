@@ -30,10 +30,14 @@ RUST_IMAGE ?= rust:1.96.1-bookworm
 CARGO_CACHE ?= win-app-switcher-cargo
 XWIN_CACHE ?= win-app-switcher-xwin
 
+# TAG (vX.Y.Z) stamps the release version into the exe (build.rs RELEASE_TAG):
+# set by the release workflow env, and required when rebuilding a tagged
+# commit to verify its sha256. Unset → dev build, no update check.
 docker-build docker-test:
 	docker run --rm -v "$(CURDIR)":/src -w /src \
 		-v "$(CARGO_CACHE)":/usr/local/cargo/registry \
 		-v "$(XWIN_CACHE)":/root/.cache/cargo-xwin \
+		-e RELEASE_TAG="$(TAG)" \
 		$(RUST_IMAGE) bin/build $(@:docker-%=%)
 
 .PHONY: build debug test docker-build docker-test

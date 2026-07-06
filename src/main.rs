@@ -11,6 +11,8 @@ mod config;
 mod hook;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod ui;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod update;
 
 #[cfg(not(windows))]
 fn main() {
@@ -32,7 +34,7 @@ mod win {
     use anyhow::{ensure, Context, Result};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{
         CloseHandle, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
@@ -57,8 +59,8 @@ mod win {
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Shell::{
-        Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING, NIM_ADD,
-        NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+        ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING,
+        NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, ChangeWindowMessageFilterEx, CreateIconIndirect, CreatePopupMenu,
@@ -68,9 +70,9 @@ mod win {
         RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SM_CXSMICON,
         TrackPopupMenu,
         TranslateMessage, HICON, HWND_BROADCAST, ICONINFO, IDYES, MB_ICONERROR, MB_ICONQUESTION,
-        MB_ICONWARNING, MB_OK, MB_YESNO, MF_STRING, MSG, MSGFLT_ALLOW, TPM_NONOTIFY,
-        TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE,
-        WM_DESTROY, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+        MB_ICONWARNING, MB_OK, MB_YESNO, MF_STRING, MSG, MSGFLT_ALLOW, SW_SHOWNORMAL,
+        TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
+        WM_CLOSE, WM_DESTROY, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
     };
 
     const CLASS_NAME: PCWSTR = w!("win-app-switcher.main");
@@ -78,12 +80,22 @@ mod win {
     const WM_TRAY: u32 = WM_APP + 1;
     const TRAY_ID: u32 = 1;
     const CMD_QUIT: usize = 1;
+    const CMD_UPDATE: usize = 2;
     /// Timer that opens the WIN+§ list dialog after `dialog_delay_ms`.
     const TIMER_WINLIST: usize = 1;
+    /// Daily update-check timer (machines rarely reboot).
+    const TIMER_UPDATE: usize = 2;
+    /// Posted by the update-check thread when a newer release exists.
+    const WM_UPDATE: u32 = WM_APP + 3;
+    /// The tag CI stamped into this build; "" on dev builds (no update check).
+    const RELEASE_TAG: &str = env!("RELEASE_TAG");
+    const RELEASES_URL: PCWSTR = w!("https://github.com/pre/win-app-switcher/releases/latest");
 
     /// Broadcast "please exit" message id, registered before the window exists.
     static EXIT_MSG: AtomicU32 = AtomicU32::new(0);
     static CONFIG: OnceLock<Config> = OnceLock::new();
+    /// Newer release tag found by the check thread; read on the UI thread.
+    static UPDATE_TAG: Mutex<Option<String>> = Mutex::new(None);
 
     /// A switcher session: from the first Next/Prev event to Commit/Cancel.
     /// Candidates are captured once at session start, in z-order.
@@ -226,7 +238,7 @@ mod win {
                 hIcon: tray_icon().context("tray icon")?,
                 ..Default::default()
             };
-            copy_wstr(&mut nid.szTip, concat!("win-app-switcher ", env!("GIT_HASH")));
+            copy_wstr(&mut nid.szTip, &format!("win-app-switcher {}", version()));
             Shell_NotifyIconW(NIM_ADD, &nid)
                 .ok()
                 .context("Shell_NotifyIconW")?;
@@ -254,6 +266,14 @@ mod win {
             }
 
             crate::hook::start(hwnd);
+
+            if RELEASE_TAG.is_empty() {
+                #[cfg(debug_assertions)]
+                println!("update check skipped: dev build (no RELEASE_TAG)");
+            } else if CONFIG.get().is_some_and(|c| c.check_updates) {
+                spawn_update_check(hwnd);
+                SetTimer(Some(hwnd), TIMER_UPDATE, 24 * 60 * 60 * 1000, None);
+            }
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -310,6 +330,14 @@ mod win {
                 show_tray_menu(hwnd);
                 LRESULT(0)
             }
+            WM_TRAY if lparam.0 as u32 == NIN_BALLOONUSERCLICK => {
+                // Only the update balloon leads anywhere; the unelevated
+                // warning balloon just dismisses.
+                if UPDATE_TAG.lock().unwrap().is_some() {
+                    open_releases_page();
+                }
+                LRESULT(0)
+            }
             m if m == crate::hook::WM_SWITCHER => {
                 if let Some(ev) = crate::hook::Event::from_wparam(wparam.0) {
                     on_event(hwnd, ev);
@@ -319,6 +347,14 @@ mod win {
             WM_TIMER if wparam.0 == TIMER_WINLIST => {
                 let _ = KillTimer(Some(hwnd), TIMER_WINLIST);
                 show_window_list(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == TIMER_UPDATE => {
+                spawn_update_check(hwnd);
+                LRESULT(0)
+            }
+            m if m == WM_UPDATE => {
+                notify_update(hwnd);
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -520,6 +556,11 @@ mod win {
 
     unsafe fn show_tray_menu(hwnd: HWND) {
         let Ok(menu) = CreatePopupMenu() else { return };
+        if let Some(tag) = UPDATE_TAG.lock().unwrap().as_deref() {
+            let wide: Vec<u16> =
+                format!("Update available: {tag}").encode_utf16().chain([0]).collect();
+            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, PCWSTR(wide.as_ptr()));
+        }
         let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit"));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -535,8 +576,78 @@ mod win {
             None,
         );
         let _ = DestroyMenu(menu);
-        if cmd.0 as usize == CMD_QUIT {
-            let _ = DestroyWindow(hwnd);
+        match cmd.0 as usize {
+            CMD_QUIT => {
+                let _ = DestroyWindow(hwnd);
+            }
+            CMD_UPDATE => open_releases_page(),
+            _ => {}
+        }
+    }
+
+    /// The release tag on CI builds, the git hash on dev builds.
+    fn version() -> &'static str {
+        if RELEASE_TAG.is_empty() {
+            env!("GIT_HASH")
+        } else {
+            RELEASE_TAG
+        }
+    }
+
+    /// Check GitHub for a newer release off-thread — the message loop must
+    /// never block (a stalled loop stalls the keyboard hook system-wide).
+    /// A newer tag lands in [`UPDATE_TAG`] and is announced via [`WM_UPDATE`];
+    /// network errors are silent, retried at the next timer tick.
+    fn spawn_update_check(hwnd: HWND) {
+        let hwnd = hwnd.0 as isize; // HWND is not Send
+        std::thread::spawn(move || {
+            if let Some(tag) = crate::update::latest_release_tag() {
+                if crate::update::is_newer(&tag, RELEASE_TAG) {
+                    *UPDATE_TAG.lock().unwrap() = Some(tag);
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(HWND(hwnd as *mut _)),
+                            WM_UPDATE,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    /// Balloon + tooltip for the newer release; repeats on every daily check
+    /// until updated. The menu row comes from [`UPDATE_TAG`] when built.
+    fn notify_update(hwnd: HWND) {
+        let Some(tag) = UPDATE_TAG.lock().unwrap().clone() else { return };
+        #[cfg(debug_assertions)]
+        println!("update available: {tag}");
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_ID,
+            uFlags: NIF_TIP | NIF_INFO,
+            ..Default::default()
+        };
+        copy_wstr(
+            &mut nid.szTip,
+            &format!("win-app-switcher {} — update available: {tag}", version()),
+        );
+        copy_wstr(&mut nid.szInfoTitle, &format!("Update available: {tag}"));
+        copy_wstr(
+            &mut nid.szInfo,
+            "Click to open the release page. Set check_updates = false in \
+             config.toml to disable this check.",
+        );
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+    }
+
+    fn open_releases_page() {
+        unsafe {
+            ShellExecuteW(None, w!("open"), RELEASES_URL, None, None, SW_SHOWNORMAL);
         }
     }
 

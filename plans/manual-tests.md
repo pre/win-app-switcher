@@ -228,3 +228,21 @@ Next/Prev event and `activate candidate i/N` on commit.
 10. Mixed-DPI monitors, `dialog_monitor = "mouse"`: the dialog opens
     correctly sized and centered on whichever monitor the mouse is on,
     both ways; mouse hover still tracks the icons/rows accurately.
+
+## M6 — Update notification
+
+Build with a fake old version so any published release is newer:
+`RELEASE_TAG=v0.0.1 make debug`, copy to the test machine.
+
+1. Shortly after start: a balloon "Update available: vX.Y.Z" appears, and
+   the tray tooltip reads "win-app-switcher v0.0.1 — update available:
+   vX.Y.Z".
+2. Clicking the balloon opens the GitHub release page in the browser.
+3. Right-click the tray icon → an "Update available: vX.Y.Z" row above
+   **Quit**; clicking it opens the release page too.
+4. `check_updates = false` in `config.toml`, restart → no balloon, no menu
+   row, tooltip without the update suffix.
+5. Plain dev build (`make debug`): console logs that the update check is
+   skipped (no RELEASE_TAG); no balloon, tooltip shows the git hash.
+6. No network (pull the cable / airplane mode), `RELEASE_TAG=v0.0.1` build:
+   starts silently, no balloon, no errors.

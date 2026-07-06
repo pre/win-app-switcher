@@ -34,6 +34,7 @@ pub struct Config {
     pub restore_minimized: bool,
     pub dialog_monitor: DialogMonitor,
     pub dialog_delay_ms: u32,
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -46,6 +47,7 @@ impl Default for Config {
             restore_minimized: true,
             dialog_monitor: DialogMonitor::Mouse,
             dialog_delay_ms: 150,
+            check_updates: true,
         }
     }
 }
@@ -110,6 +112,7 @@ mod tests {
             restore_minimized = false
             dialog_monitor = "primary"
             dialog_delay_ms = 300
+            check_updates = false
             "#,
         )
         .unwrap();
@@ -120,6 +123,7 @@ mod tests {
         assert!(!cfg.restore_minimized);
         assert_eq!(cfg.dialog_monitor, DialogMonitor::Primary);
         assert_eq!(cfg.dialog_delay_ms, 300);
+        assert!(!cfg.check_updates);
     }
 
     #[test]

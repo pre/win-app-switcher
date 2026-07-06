@@ -44,6 +44,14 @@ schtasks /Create /TN win-app-switcher /TR "C:\path\to\win-app-switcher.exe" /SC 
 Or in the Task Scheduler GUI: Create Task → check **Run with highest
 privileges** → Triggers → **At log on**.
 
+## Updates
+
+The switcher checks GitHub for a newer release at startup and daily, and
+notifies with a tray balloon and an "Update available" tray-menu row.
+Clicking either opens the release page — updating is a manual download,
+there is no self-update. Set `check_updates = false` in `config.toml` to
+disable the check.
+
 ## Antivirus false positives
 
 The switcher installs a low-level keyboard hook (`WH_KEYBOARD_LL`) — the
@@ -78,6 +86,7 @@ bot as a collaborator with write access and store its PAT as the
 `RELEASE_BOT_TOKEN` Actions secret.
 
 A released exe can be verified independently: check out the tagged commit,
-run `make docker-build` (same pinned image as CI), and compare
-`dist/win-app-switcher.exe.sha256` against the release asset.
+run `TAG=vX.Y.Z make docker-build` (same pinned image and version stamp as
+CI), and compare `dist/win-app-switcher.exe.sha256` against the release
+asset.
 
