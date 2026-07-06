@@ -246,9 +246,9 @@ mod win {
                 copy_wstr(&mut nid.szInfoTitle, "Running without administrator rights");
                 copy_wstr(
                     &mut nid.szInfo,
-                    "Switching works, but may lag under heavy load and pauses while \
-                     an elevated window has focus. See README \u{201c}Start at \
-                     login\u{201d} for elevated autostart without UAC prompts.",
+                    "Run win-app-switcher as an administrator so windows launched \
+                     from WSL are included. See also README \u{201c}Start at \
+                     login\u{201d}.",
                 );
                 let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
             }
