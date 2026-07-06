@@ -44,7 +44,7 @@ mod win {
         CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
         DrawTextW, GdiFlush, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-        DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, OUT_DEFAULT_PRECIS, TRANSPARENT,
+        DIB_RGB_COLORS, DT_NOCLIP, DT_SINGLELINE, HBITMAP, HDC, OUT_DEFAULT_PRECIS, TRANSPARENT,
     };
     use windows::Win32::Security::{
         GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
@@ -56,7 +56,8 @@ mod win {
         REALTIME_PRIORITY_CLASS,
     };
     use windows::Win32::UI::HiDpi::{
-        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Shell::{
         ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
@@ -66,10 +67,10 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, ChangeWindowMessageFilterEx, CreateIconIndirect, CreatePopupMenu,
         CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-        DestroyIcon, GetCursorPos, GetMessageW, GetSystemMetrics, KillTimer, MessageBoxW,
+        DestroyIcon, GetCursorPos, GetMessageW, KillTimer, MessageBoxW,
         PostMessageW, PostQuitMessage,
         RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SM_CXICON,
-        SM_CXSMICON,
+        SM_CXSMICON, SYSTEM_METRICS_INDEX,
         TrackPopupMenu,
         TranslateMessage, HICON, HWND_BROADCAST, ICONINFO, IDYES, MB_ICONERROR, MB_ICONQUESTION,
         MB_ICONWARNING, MB_OK, MB_YESNO, MF_STRING, MSG, MSGFLT_ALLOW, SW_SHOWNORMAL,
@@ -237,9 +238,9 @@ mod win {
                 uID: TRAY_ID,
                 uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
                 uCallbackMessage: WM_TRAY,
-                // Drawn at the shell's DPI-scaled small-icon size: shown
+                // Drawn at the taskbar's DPI-scaled small-icon size: shown
                 // 1:1, no shell rescale to soften the glyph.
-                hIcon: tray_icon(GetSystemMetrics(SM_CXSMICON)).context("tray icon")?,
+                hIcon: tray_icon(icon_size(hwnd, SM_CXSMICON)).context("tray icon")?,
                 ..Default::default()
             };
             copy_wstr(&mut nid.szTip, &format!("win-app-switcher {}", version()));
@@ -629,7 +630,7 @@ mod win {
         println!("update available: {tag}");
         // Without an explicit balloon icon the toast stretches the small
         // tray icon to toast size, blurring the glyph — redraw it large.
-        let balloon = unsafe { tray_icon(GetSystemMetrics(SM_CXICON)).ok() };
+        let balloon = unsafe { tray_icon(icon_size(hwnd, SM_CXICON)).ok() };
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
@@ -664,11 +665,20 @@ mod win {
         }
     }
 
-    /// Draw "§" into a size×size ARGB bitmap and wrap it in an HICON.
-    /// Runtime GDI drawing avoids shipping and embedding an .ico resource.
-    unsafe fn tray_icon(size: i32) -> Result<HICON> {
-        let size = size.max(16);
-        let dc = CreateCompatibleDC(None);
+    /// Icon metric scaled to the taskbar's DPI: plain GetSystemMetrics is
+    /// not DPI-aware in a PMv2 process (returns 96-dpi values), so a 150%
+    /// display would get a 16 px icon stretched to 24 px by the shell.
+    unsafe fn icon_size(hwnd: HWND, metric: SYSTEM_METRICS_INDEX) -> i32 {
+        let dpi = GetDpiForWindow(hwnd);
+        let size = GetSystemMetricsForDpi(metric, dpi);
+        #[cfg(debug_assertions)]
+        println!("icon: {size}px at {dpi} dpi");
+        size
+    }
+
+    /// size×size white 32-bit top-down DIB; the glyph is drawn black on it
+    /// and the coverage becomes alpha.
+    unsafe fn white_canvas(dc: HDC, size: i32) -> Result<(HBITMAP, *mut u32)> {
         let bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -682,17 +692,24 @@ mod win {
             ..Default::default()
         };
         let mut bits = std::ptr::null_mut();
-        let color =
+        let bmp =
             CreateDIBSection(Some(dc), &bi, DIB_RGB_COLORS, &mut bits, None, 0).context("DIB")?;
-        // White canvas; the glyph is drawn black and the coverage becomes alpha below.
         std::ptr::write_bytes(bits as *mut u8, 0xFF, (size * size) as usize * 4);
-        let old_bmp = SelectObject(dc, color.into());
+        Ok((bmp, bits as *mut u32))
+    }
+
+    /// Paint "⌘" black at `em` px with its line box starting at (dx, dy):
+    /// left/top-aligned and unclipped, so the ink position and extent scale
+    /// linearly with `em` and can be predicted from a measurement pass.
+    unsafe fn draw_glyph(dc: HDC, em: i32, dx: i32, dy: i32) {
         let font = CreateFontW(
-            -(size - 4),
+            -em,
             0,
             0,
             0,
-            600, // semibold
+            // Regular: Segoe UI Symbol has no bold face, and GDI's
+            // synthetic bold smears small glyphs.
+            400,
             0,
             0,
             0,
@@ -701,30 +718,78 @@ mod win {
             CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY,
             DEFAULT_PITCH.0 as u32,
-            w!("Segoe UI"),
+            // Segoe UI proper has no U+2318; don't rely on font linking.
+            w!("Segoe UI Symbol"),
         );
         let old_font = SelectObject(dc, font.into());
         SetTextColor(dc, COLORREF(0));
         SetBkMode(dc, TRANSPARENT);
         let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: size,
-            bottom: size,
+            left: dx,
+            top: dy,
+            right: dx + em * 2,
+            bottom: dy + em * 2,
         };
-        let mut glyph: Vec<u16> = "§".encode_utf16().collect();
-        DrawTextW(dc, &mut glyph, &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        let mut glyph: Vec<u16> = "⌘".encode_utf16().collect();
+        DrawTextW(dc, &mut glyph, &mut rect, DT_SINGLELINE | DT_NOCLIP);
         let _ = GdiFlush();
+        SelectObject(dc, old_font);
+        let _ = DeleteObject(font.into());
+    }
+
+    /// Ink bounding box (left, top, right, bottom; inclusive) of black
+    /// coverage on a white width×width canvas. None if nothing was drawn.
+    fn ink_bbox(px: &[u32], width: i32) -> Option<(i32, i32, i32, i32)> {
+        let (mut l, mut t, mut r, mut b) = (i32::MAX, i32::MAX, -1, -1);
+        for (i, p) in px.iter().enumerate() {
+            if *p & 0xFF != 0xFF {
+                let (x, y) = (i as i32 % width, i as i32 / width);
+                l = l.min(x);
+                t = t.min(y);
+                r = r.max(x);
+                b = b.max(y);
+            }
+        }
+        (r >= 0).then_some((l, t, r, b))
+    }
+
+    /// Draw "⌘" into a size×size ARGB bitmap and wrap it in an HICON.
+    /// Runtime GDI drawing avoids shipping and embedding an .ico resource.
+    /// A glyph's ink is a font-specific fraction of the em, so draw once on
+    /// a scratch canvas to measure it, then redraw scaled and centered so
+    /// the ink fills the icon box.
+    unsafe fn tray_icon(size: i32) -> Result<HICON> {
+        let size = size.max(16);
+        let dc = CreateCompatibleDC(None);
+
+        // Measurement pass at em = size on a 2×2-em scratch canvas — the
+        // line box exceeds the em, and clipped ink would skew the numbers.
+        let (scratch, sbits) = white_canvas(dc, size * 2)?;
+        let old_bmp = SelectObject(dc, scratch.into());
+        draw_glyph(dc, size, 0, 0);
+        let spx = std::slice::from_raw_parts(sbits, ((size * 2) * (size * 2)) as usize);
+        let (l, t, r, b) = ink_bbox(spx, size * 2).context("blank glyph")?;
+
+        // Scale the em so the ink fills the box less a 1 px margin per side
+        // (absorbs hinting jitter), then center the predicted ink box.
+        let ink = (r - l + 1).max(b - t + 1);
+        let em = size * (size - 2) / ink;
+        let dx = (size - (r - l + 1) * em / size) / 2 - l * em / size;
+        let dy = (size - (b - t + 1) * em / size) / 2 - t * em / size;
+
+        let (color, bits) = white_canvas(dc, size)?;
+        SelectObject(dc, color.into());
+        let _ = DeleteObject(scratch.into());
+        draw_glyph(dc, em, dx, dy);
+
         // Alpha = glyph coverage (black on white), premultiplied. Black glyph:
         // stands out on the gray/light taskbar.
-        let px = std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize);
+        let px = std::slice::from_raw_parts_mut(bits, (size * size) as usize);
         for p in px.iter_mut() {
             let a = 0xFF - (*p & 0xFF);
             *p = a << 24;
         }
-        SelectObject(dc, old_font);
         SelectObject(dc, old_bmp);
-        let _ = DeleteObject(font.into());
         let mask = CreateBitmap(size, size, 1, 1, None);
         let info = ICONINFO {
             fIcon: true.into(),
