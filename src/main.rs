@@ -59,15 +59,17 @@ mod win {
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Shell::{
-        ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING,
-        NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW,
+        ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
+        NIIF_LARGE_ICON, NIIF_USER, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+        NIN_BALLOONUSERCLICK, NOTIFYICONDATAW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, ChangeWindowMessageFilterEx, CreateIconIndirect, CreatePopupMenu,
         CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-        GetCursorPos, GetMessageW, GetSystemMetrics, KillTimer, MessageBoxW, PostMessageW,
-        PostQuitMessage,
-        RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SM_CXSMICON,
+        DestroyIcon, GetCursorPos, GetMessageW, GetSystemMetrics, KillTimer, MessageBoxW,
+        PostMessageW, PostQuitMessage,
+        RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SM_CXICON,
+        SM_CXSMICON,
         TrackPopupMenu,
         TranslateMessage, HICON, HWND_BROADCAST, ICONINFO, IDYES, MB_ICONERROR, MB_ICONQUESTION,
         MB_ICONWARNING, MB_OK, MB_YESNO, MF_STRING, MSG, MSGFLT_ALLOW, SW_SHOWNORMAL,
@@ -235,7 +237,9 @@ mod win {
                 uID: TRAY_ID,
                 uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
                 uCallbackMessage: WM_TRAY,
-                hIcon: tray_icon().context("tray icon")?,
+                // Drawn at the shell's DPI-scaled small-icon size: shown
+                // 1:1, no shell rescale to soften the glyph.
+                hIcon: tray_icon(GetSystemMetrics(SM_CXSMICON)).context("tray icon")?,
                 ..Default::default()
             };
             copy_wstr(&mut nid.szTip, &format!("win-app-switcher {}", version()));
@@ -623,11 +627,16 @@ mod win {
         let Some(tag) = UPDATE_TAG.lock().unwrap().clone() else { return };
         #[cfg(debug_assertions)]
         println!("update available: {tag}");
+        // Without an explicit balloon icon the toast stretches the small
+        // tray icon to toast size, blurring the glyph — redraw it large.
+        let balloon = unsafe { tray_icon(GetSystemMetrics(SM_CXICON)).ok() };
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
             uID: TRAY_ID,
             uFlags: NIF_TIP | NIF_INFO,
+            dwInfoFlags: NIIF_USER | NIIF_LARGE_ICON,
+            hBalloonIcon: balloon.unwrap_or_default(),
             ..Default::default()
         };
         copy_wstr(
@@ -642,6 +651,10 @@ mod win {
         );
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+            // The shell copies the icon during the call.
+            if let Some(icon) = balloon {
+                let _ = DestroyIcon(icon);
+            }
         }
     }
 
@@ -651,12 +664,10 @@ mod win {
         }
     }
 
-    /// Draw "§" into a 32×32 ARGB bitmap and wrap it in an HICON.
+    /// Draw "§" into a size×size ARGB bitmap and wrap it in an HICON.
     /// Runtime GDI drawing avoids shipping and embedding an .ico resource.
-    unsafe fn tray_icon() -> Result<HICON> {
-        // The size the shell actually shows (DPI-scaled in a PMv2 process):
-        // drawn 1:1, no shell rescale to soften the glyph.
-        let size = GetSystemMetrics(SM_CXSMICON).max(16);
+    unsafe fn tray_icon(size: i32) -> Result<HICON> {
+        let size = size.max(16);
         let dc = CreateCompatibleDC(None);
         let bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
