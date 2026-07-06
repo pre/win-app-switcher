@@ -8,7 +8,8 @@
 # counter) and opens the draft in the browser: review and press
 # "Publish release": publishing creates the tag.
 #
-# Usage: bin/release-github <version-tag> [--dry-run]
+# Usage: bin/release-github <version-tag>|major|minor|patch [--dry-run]
+#        major/minor/patch increments the previous v* tag by one.
 #        --dry-run prints the generated notes without touching GitHub.
 set -euo pipefail
 
@@ -17,7 +18,7 @@ REPO="pre/win-app-switcher"
 if [[ $# -lt 1 ]]; then
   >&2 cat <<EOF
 
-Usage: $0 <version-tag> [--dry-run]
+Usage: $0 <version-tag>|major|minor|patch [--dry-run]
 
 Previous releases:
   https://github.com/pre/win-app-switcher/releases
@@ -29,17 +30,27 @@ fi
 VERSION="$1"
 DRY_RUN="${2:-}"
 
-if [[ ! "$VERSION" =~ ^v[0-9] ]]; then
-  echo "version must look like v1.2.3, got: $VERSION" >&2
-  exit 2
-fi
-
 # Publishing a draft creates the tag on GitHub only, so sync tags first or the
 # previous-tag lookup below misses them and the notes repeat older releases.
 git fetch -q --tags origin
 
-HEAD_SHA="$(git rev-parse HEAD)"
 PREV_TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+
+if [[ "$VERSION" =~ ^(major|minor|patch)$ ]]; then
+  [[ "$PREV_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] \
+    || { echo "previous tag '${PREV_TAG:-none}' is not vX.Y.Z; pass an explicit version" >&2; exit 2; }
+  case "$VERSION" in
+    major) VERSION="v$((BASH_REMATCH[1] + 1)).0.0" ;;
+    minor) VERSION="v${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1)).0" ;;
+    patch) VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))" ;;
+  esac
+  echo "previous release: $PREV_TAG -> releasing $VERSION" >&2
+elif [[ ! "$VERSION" =~ ^v[0-9] ]]; then
+  echo "version must look like v1.2.3, got: $VERSION" >&2
+  exit 2
+fi
+
+HEAD_SHA="$(git rev-parse HEAD)"
 RANGE="${PREV_TAG:+$PREV_TAG..}HEAD"
 SUBJECTS="$(git log --no-merges --pretty='%s' "$RANGE")"
 [[ -n "$SUBJECTS" ]] || { echo "no new commits since ${PREV_TAG:-start}; nothing to release" >&2; exit 1; }
