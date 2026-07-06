@@ -16,7 +16,7 @@
 const ICON: f32 = 64.0;
 const CELL: f32 = 84.0; // icon cell = selection square
 const PAD: f32 = 24.0; // panel padding around the row
-const LABEL_H: f32 = 30.0; // name strip under the icons
+const LABEL_H: f32 = 20.0; // name strip under the icons, hugs the 14 px line
 
 /// Window list:
 const ROW_H: f32 = 44.0;
