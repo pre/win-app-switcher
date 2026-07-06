@@ -27,6 +27,43 @@ pub fn step_index(len: usize, index: usize, forward: bool) -> usize {
     (index + if forward { 1 } else { len - 1 }) % len
 }
 
+/// Area-average resample of a square premultiplied-BGRA image. Averaging in
+/// premultiplied space keeps fully transparent pixels black, so icon edges
+/// blend cleanly at any background — unlike the shell's own scaler, which
+/// resamples in straight alpha and bleeds the (usually white) color stored
+/// under transparent pixels into the edges.
+pub fn downscale_premul_bgra(src: &[u8], src_px: u32, dst_px: u32) -> Vec<u8> {
+    let (s, d) = (src_px as usize, dst_px as usize);
+    let ratio = s as f32 / d as f32;
+    let mut out = vec![0u8; d * d * 4];
+    for dy in 0..d {
+        for dx in 0..d {
+            // Source box covered by this destination pixel, with fractional
+            // edge weights so non-integer ratios stay artifact-free.
+            let (x0, x1) = (dx as f32 * ratio, (dx + 1) as f32 * ratio);
+            let (y0, y1) = (dy as f32 * ratio, (dy + 1) as f32 * ratio);
+            let mut acc = [0.0f32; 4];
+            let mut area = 0.0f32;
+            for sy in y0.floor() as usize..(y1.ceil() as usize).min(s) {
+                let wy = (y1.min(sy as f32 + 1.0) - y0.max(sy as f32)).max(0.0);
+                for sx in x0.floor() as usize..(x1.ceil() as usize).min(s) {
+                    let w = wy * (x1.min(sx as f32 + 1.0) - x0.max(sx as f32)).max(0.0);
+                    let p = &src[(sy * s + sx) * 4..][..4];
+                    for c in 0..4 {
+                        acc[c] += w * f32::from(p[c]);
+                    }
+                    area += w;
+                }
+            }
+            let o = &mut out[(dy * d + dx) * 4..][..4];
+            for c in 0..4 {
+                o[c] = (acc[c] / area).round() as u8;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(windows)]
 pub use win::*;
 
@@ -55,7 +92,7 @@ mod win {
     };
     use windows::Win32::UI::Shell::{
         IShellItemImageFactory, IVirtualDesktopManager, SHCreateItemFromParsingName,
-        VirtualDesktopManager, SIIGBF_ICONONLY,
+        VirtualDesktopManager, SIIGBF, SIIGBF_ICONONLY, SIIGBF_SCALEUP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetForegroundWindow, GetParent,
@@ -228,9 +265,17 @@ mod win {
         let wide: Vec<u16> = exe.encode_utf16().chain([0]).collect();
         let item: IShellItemImageFactory =
             SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>).ok()?;
-        let cx = px as i32;
+        // Ask for the 256 px frame — the icon's native high-res image, so the
+        // shell does no resampling of its own — and downscale to `px` here in
+        // premultiplied space (see downscale_premul_bgra); asking the shell
+        // for `px` directly leaves a white fringe around the edges. SCALEUP
+        // stretches icons that lack a 256 frame instead of padding them.
+        let src = px.max(256);
+        let cx = src as i32;
         // GetImage output is AlphaBlend-ready: 32-bit premultiplied BGRA.
-        let bitmap = item.GetImage(SIZE { cx, cy: cx }, SIIGBF_ICONONLY).ok()?;
+        let bitmap = item
+            .GetImage(SIZE { cx, cy: cx }, SIIGBF(SIIGBF_ICONONLY.0 | SIIGBF_SCALEUP.0))
+            .ok()?;
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -243,20 +288,26 @@ mod win {
             },
             ..Default::default()
         };
-        let mut bits = vec![0u8; (px * px * 4) as usize];
+        let mut bits = vec![0u8; (src * src * 4) as usize];
         let dc = CreateCompatibleDC(None);
         let lines = GetDIBits(
             dc,
             bitmap,
             0,
-            px,
+            src,
             Some(bits.as_mut_ptr() as *mut _),
             &mut info,
             DIB_RGB_COLORS,
         );
         let _ = DeleteDC(dc);
         let _ = DeleteObject(bitmap.into());
-        (lines != 0).then_some(bits)
+        (lines != 0).then(|| {
+            if src == px {
+                bits
+            } else {
+                super::downscale_premul_bgra(&bits, src, px)
+            }
+        })
     }
 
     /// The foreground app's exe path and all its windows in z-order
@@ -449,6 +500,26 @@ mod tests {
     #[test]
     fn grouping_empty_input() {
         assert!(group_by_key::<i32, &str>(vec![]).is_empty());
+    }
+
+    #[test]
+    fn downscale_averages_in_premultiplied_space() {
+        // 4×4, top half opaque white, bottom half fully transparent (all
+        // zero, as premultiplied data is). One output pixel = plain average:
+        // 50% alpha with matching color — no brightening at the edge.
+        let mut src = vec![0u8; 4 * 4 * 4];
+        src[..4 * 2 * 4].fill(255);
+        assert_eq!(downscale_premul_bgra(&src, 4, 1), vec![128, 128, 128, 128]);
+    }
+
+    #[test]
+    fn downscale_handles_fractional_ratio_and_identity() {
+        // Uniform image stays uniform through fractional 5→2 boxes.
+        let gray = vec![100u8; 5 * 5 * 4];
+        assert_eq!(downscale_premul_bgra(&gray, 5, 2), vec![100u8; 2 * 2 * 4]);
+        // Ratio 1 reproduces the input exactly.
+        let ramp: Vec<u8> = (0..3 * 3 * 4).map(|i| i as u8).collect();
+        assert_eq!(downscale_premul_bgra(&ramp, 3, 3), ramp);
     }
 
     #[test]
