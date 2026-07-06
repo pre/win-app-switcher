@@ -1,0 +1,44 @@
+# Builds win-app-switcher.exe for a DRAFT release. bin/github-release creates
+# a draft pinned to HEAD with generated notes and dispatches this workflow,
+# which tests and builds the exe in the pinned Rust image (the same
+# `make docker-build` runs locally, so a released exe can be re-verified by
+# rebuilding the tagged commit) and attaches the assets to the draft.
+# Publishing the reviewed draft creates the tag.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the draft release (vX.Y.Z)
+        required: true
+      sha:
+        description: Commit the draft release is pinned to
+        required: true
+
+# The default GITHUB_TOKEN is read-only; draft asset upload uses the bot's PAT.
+permissions:
+  contents: read
+
+jobs:
+  build-and-attach:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The draft has no tag yet; build exactly the commit it is pinned to.
+          ref: ${{ inputs.sha }}
+      - run: make docker-test
+      - run: make docker-build
+      - name: Attach assets to the draft
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+        run: |
+          # gh resolves drafts by tag name (falls back to the release list).
+          gh release upload "$TAG" \
+            dist/win-app-switcher.exe \
+            dist/win-app-switcher.exe.sha256 \
+            config.example.toml \
+            --repo "$GITHUB_REPOSITORY" --clobber

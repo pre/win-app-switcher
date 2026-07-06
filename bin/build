@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Runs INSIDE the pinned Rust image (Makefile docker-build / docker-test).
+# The same container build runs locally and in .github/workflows/release.yml,
+# so a released exe can be re-verified by rebuilding the tagged commit with
+# `make docker-build` and comparing sha256s.
+#
+# Usage: bin/build build|test
+set -euo pipefail
+
+XWIN_VERSION=0.23.0
+TARGET=x86_64-pc-windows-msvc
+
+# The mounted repo belongs to the host user; without this, build.rs's
+# `git describe` fails and stamps the exe "unknown".
+git config --global --add safe.directory /src
+
+if [[ "${1:-build}" == "test" ]]; then
+  exec cargo test
+fi
+
+ARCH="$(uname -m)" # x86_64 on the CI runner, aarch64 in Apple Silicon Docker
+curl -sSfL "https://github.com/rust-cross/cargo-xwin/releases/download/v${XWIN_VERSION}/cargo-xwin-v${XWIN_VERSION}.${ARCH}-unknown-linux-musl.tar.gz" |
+  tar -xz -C /usr/local/bin cargo-xwin
+rustup target add "$TARGET"
+cargo xwin build --release --target "$TARGET"
+
+mkdir -p dist
+cp "target/$TARGET/release/win-app-switcher.exe" dist/
+(cd dist && sha256sum win-app-switcher.exe >win-app-switcher.exe.sha256)
+ls -lh dist/

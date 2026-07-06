@@ -44,3 +44,25 @@ schtasks /Create /TN win-app-switcher /TR "C:\path\to\win-app-switcher.exe" /SC 
 Or in the Task Scheduler GUI: Create Task → check **Run with highest
 privileges** → Triggers → **At log on**.
 
+## Publishing a release
+
+```
+bin/github-release v1.2.3
+```
+
+This drafts a GitHub release pinned to HEAD (notes generated from
+conventional commits) and dispatches the release workflow, which tests and
+builds `win-app-switcher.exe` in the pinned Rust image and attaches it
+(+ `.sha256`, `config.example.toml`) to the draft. Wait for the assets to
+appear, review the draft in the browser, then press **Publish release** —
+publishing creates the git tag.
+
+The workflow uploads assets with the release bot's PAT, so the default
+read-only `GITHUB_TOKEN` never needs write access. One-time setup: add the
+bot as a collaborator with write access and store its PAT as the
+`RELEASE_BOT_TOKEN` Actions secret.
+
+A released exe can be verified independently: check out the tagged commit,
+run `make docker-build` (same pinned image as CI), and compare
+`dist/win-app-switcher.exe.sha256` against the release asset.
+
