@@ -53,6 +53,12 @@ way (AltAppSwitcher included), not a sign of anything malicious. If it
 happens, add an exclusion for the exe, or build from source and verify the
 binary against the release as described below.
 
+## Similar projects
+
+- [AltAppSwitcher](https://github.com/hdlx/AltAppSwitcher) — an
+  application-centric alt-tab switcher for Windows, written in C. Thanks to
+  it for the inspiration behind this project.
+
 ## Publishing a release
 
 ```
