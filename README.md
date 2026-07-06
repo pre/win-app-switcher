@@ -44,6 +44,15 @@ schtasks /Create /TN win-app-switcher /TR "C:\path\to\win-app-switcher.exe" /SC 
 Or in the Task Scheduler GUI: Create Task → check **Run with highest
 privileges** → Triggers → **At log on**.
 
+## Antivirus false positives
+
+The switcher installs a low-level keyboard hook (`WH_KEYBOARD_LL`) — the
+same API keyloggers use — so heuristic antivirus scanners occasionally
+flag the unsigned exe. This is a known issue for every switcher built this
+way (AltAppSwitcher included), not a sign of anything malicious. If it
+happens, add an exclusion for the exe, or build from source and verify the
+binary against the release as described below.
+
 ## Publishing a release
 
 ```
