@@ -1,4 +1,4 @@
-# Builds win-app-switcher.exe for a DRAFT release. bin/github-release creates
+# Builds win-app-switcher.exe for a DRAFT release. bin/release-github creates
 # a draft pinned to HEAD with generated notes and dispatches this workflow,
 # which tests and builds the exe in the pinned Rust image (the same
 # `make docker-build` runs locally, so a released exe can be re-verified by

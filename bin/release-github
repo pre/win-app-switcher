@@ -8,14 +8,22 @@
 # counter) and opens the draft in the browser: review and press
 # "Publish release": publishing creates the tag.
 #
-# Usage: bin/github-release <version-tag> [--dry-run]
+# Usage: bin/release-github <version-tag> [--dry-run]
 #        --dry-run prints the generated notes without touching GitHub.
 set -euo pipefail
 
 REPO="pre/win-app-switcher"
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <version-tag> [--dry-run]   e.g. $0 v1.2.3" >&2
+  >&2 cat <<EOF
+
+Usage: $0 <version-tag> [--dry-run]
+
+Previous releases:
+  https://github.com/pre/win-app-switcher/releases
+
+EOF
+
   exit 2
 fi
 VERSION="$1"

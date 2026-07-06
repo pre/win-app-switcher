@@ -62,7 +62,7 @@ binary against the release as described below.
 ## Publishing a release
 
 ```
-bin/github-release v1.2.3
+bin/release-github v1.2.3
 ```
 
 This drafts a GitHub release pinned to HEAD (notes generated from
