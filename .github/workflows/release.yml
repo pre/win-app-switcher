@@ -35,11 +35,11 @@ jobs:
           # The draft has no tag yet; build exactly the commit it is pinned to.
           ref: ${{ inputs.sha }}
       # The MSVC CRT/SDK download only changes when the xwin setup does.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .cache/xwin
           key: xwin-${{ hashFiles('bin/build') }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .cache/cargo-registry
           key: cargo-registry-${{ hashFiles('Cargo.lock') }}
