@@ -332,7 +332,8 @@ mod win {
         static DLG: RefCell<Option<Dlg>> = const { RefCell::new(None) };
     }
 
-    /// App switcher: one icon per app group.
+    /// App switcher: one icon per app group. Icons are extracted at the size
+    /// they are drawn at, so the row shows them 1:1 pixel-exact.
     pub fn show(main_hwnd: HWND, groups: &[crate::apps::AppGroup], kb: usize, cfg: &Config) {
         let (work, dpi) = monitor_work_rect(cfg.dialog_monitor);
         let scale = cfg.scale * dpi;
@@ -553,10 +554,12 @@ mod win {
         });
     }
 
-    /// Work rect of the target monitor and its DPI scale (1.0 = 96 dpi).
-    /// The process is per-monitor DPI aware (see run()), so all coordinates
-    /// are physical pixels; layouts fold the DPI scale into the user's
-    /// `scale` so the dialog has the same visual size on every monitor.
+    /// Work rect of the target monitor and its DPI scale (1.0 = 96 dpi),
+    /// from one query so the size and the position can never disagree about
+    /// the monitor. The process is per-monitor DPI aware (see run()), so all
+    /// coordinates are physical pixels; layouts fold the DPI scale into the
+    /// user's `scale` so the dialog has the same visual size on every
+    /// monitor — rendered pixel-true instead of DWM-stretched.
     fn monitor_work_rect(which: DialogMonitor) -> (RECT, f32) {
         unsafe {
             let mut pt = POINT::default();
@@ -731,6 +734,13 @@ mod win {
         D2D_RECT_F { left: r[0], top: r[1], right: r[2], bottom: r[3] }
     }
 
+    /// Snap a rect to whole pixels: non-integer scales put layout rects on
+    /// fractional coordinates, which resamples icons and shifts glyph runs
+    /// off the pixel grid — both read as blur.
+    fn snap(r: [f32; 4]) -> [f32; 4] {
+        r.map(f32::round)
+    }
+
     fn rounded(r: [f32; 4], radius: f32) -> D2D1_ROUNDED_RECT {
         D2D1_ROUNDED_RECT { rect: rect(r), radiusX: radius, radiusY: radius }
     }
@@ -774,7 +784,7 @@ mod win {
     unsafe fn draw_row(x: &D2d, l: &Layout, entries: &[Entry], sel: usize, pal: &Palette) {
         let radius = 10.0 * l.scale;
         x.brush.SetColor(&pal.hilite);
-        x.rt.FillRoundedRectangle(&rounded(l.cell(sel), radius), &x.brush);
+        x.rt.FillRoundedRectangle(&rounded(snap(l.cell(sel)), radius), &x.brush);
         for (i, bitmap) in x.bitmaps.iter().enumerate() {
             draw_icon(x, bitmap, l.icon(i), radius, pal);
         }
@@ -785,7 +795,7 @@ mod win {
                 x.rt.DrawText(
                     &entry.name,
                     &x.text,
-                    &rect(l.label(sel)),
+                    &rect(snap(l.label(sel))),
                     &x.brush,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
                     DWRITE_MEASURING_MODE_GDI_CLASSIC,
@@ -797,7 +807,7 @@ mod win {
     unsafe fn draw_list(x: &D2d, l: &ListLayout, entries: &[Entry], sel: usize, pal: &Palette) {
         let radius = 8.0 * l.scale;
         x.brush.SetColor(&pal.hilite);
-        x.rt.FillRoundedRectangle(&rounded(l.row(sel), radius), &x.brush);
+        x.rt.FillRoundedRectangle(&rounded(snap(l.row(sel)), radius), &x.brush);
         let _ = x.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         for (i, entry) in entries.iter().enumerate() {
             draw_icon(x, &x.bitmaps[i], l.icon(i), 6.0 * l.scale, pal);
@@ -805,7 +815,7 @@ mod win {
             x.rt.DrawText(
                 &entry.name,
                 &x.text,
-                &rect(l.name(i)),
+                &rect(snap(l.name(i))),
                 &x.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_GDI_CLASSIC,
@@ -814,7 +824,7 @@ mod win {
             x.rt.DrawText(
                 &entry.title,
                 &x.text,
-                &rect(l.title(i)),
+                &rect(snap(l.title(i))),
                 &x.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_GDI_CLASSIC,
@@ -829,6 +839,7 @@ mod win {
         radius: f32,
         pal: &Palette,
     ) {
+        let r = snap(r);
         match bitmap {
             Some(b) => x.rt.DrawBitmap(
                 b,

@@ -4,8 +4,9 @@
 # Features / Fixes / Tests / Chores / Other), then dispatches
 # .github/workflows/release.yml to build win-app-switcher.exe in the pinned
 # Rust image and attach it (+ .sha256, config.example.toml) TO THE DRAFT using
-# the release bot's PAT. Review the draft in the browser once the assets
-# appear and press "Publish release": publishing creates the tag.
+# the release bot's PAT. The script then waits for the build (elapsed-time
+# counter) and opens the draft in the browser: review and press
+# "Publish release": publishing creates the tag.
 #
 # Usage: bin/github-release <version-tag> [--dry-run]
 #        --dry-run prints the generated notes without touching GitHub.
@@ -74,16 +75,60 @@ URL="$(gh release create "$VERSION" \
   --title "$VERSION" \
   --notes "$NOTES")"
 
+latest_run() {
+  gh run list --repo "$REPO" --workflow release.yml --limit 1 \
+    --json databaseId -q '.[0].databaseId' 2>/dev/null || true
+}
+
+# Identify our dispatched run without clock comparisons: remember the newest
+# run before dispatching and wait for a newer one to appear.
+PREV_RUN="$(latest_run)"
 gh workflow run release.yml --repo "$REPO" -f tag="$VERSION" -f sha="$HEAD_SHA"
+RUN_ID=""
+for _ in {1..30}; do
+  sleep 2
+  RUN_ID="$(latest_run)"
+  [[ -n "$RUN_ID" && "$RUN_ID" != "$PREV_RUN" ]] && break
+  RUN_ID=""
+done
+[[ -n "$RUN_ID" ]] || {
+  echo "dispatched run did not appear; check https://github.com/$REPO/actions" >&2
+  exit 1
+}
+RUN_URL="https://github.com/$REPO/actions/runs/$RUN_ID"
 
 cat >&2 <<EOF
 
-Draft release created (invisible to others until published):
+Draft release (invisible to others until published):
 
-  $URL
+  Release:  $URL
+  Build:    $RUN_URL
 
-The build workflow was dispatched; it attaches win-app-switcher.exe
-(+ .sha256, config.example.toml) to the draft. WAIT for the assets to
-appear on the draft, review, then press "Publish release". Publishing
-creates tag $VERSION at $HEAD_SHA.
+Waiting for the build to attach win-app-switcher.exe to the draft…
 EOF
+
+START=$SECONDS
+STATE="queued/"
+TICK=0
+while :; do
+  if (( TICK % 10 == 0 )); then # tick the clock every second, poll gh every 10th
+    NEW="$(gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion \
+      -q '.status + "/" + .conclusion' 2>/dev/null || true)"
+    [[ -n "$NEW" ]] && STATE="$NEW"
+  fi
+  ELAPSED=$((SECONDS - START))
+  printf '\r  %d:%02d  %s   ' $((ELAPSED / 60)) $((ELAPSED % 60)) "${STATE%/}" >&2
+  [[ "$STATE" == completed/* ]] && break
+  TICK=$((TICK + 1))
+  sleep 1
+done
+printf '\n' >&2
+
+if [[ "$STATE" == "completed/success" ]]; then
+  echo "Build done. Review the draft, then press \"Publish release\":" >&2
+  echo "publishing creates tag $VERSION at $HEAD_SHA." >&2
+  open "$URL"
+else
+  echo "Build ended with '${STATE#completed/}'; draft is missing assets: $RUN_URL" >&2
+  exit 1
+fi
