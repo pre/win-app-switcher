@@ -28,21 +28,39 @@ How it differs from the built-in alt-tab:
 
 ## Start at login
 
-The switcher works as a normal user, with two degradations (a tray balloon
-warns about them at startup): process priority falls from REALTIME to HIGH,
-so switching may lag under full CPU load, and WIN shortcuts pass through
-while an elevated window (admin terminal, installer) has focus — Windows
-hides keystrokes in elevated windows from unelevated programs.
-
-For the full experience, start it elevated at every login without a UAC
-prompt using a Task Scheduler logon task. In an elevated prompt:
+Run `win-app-switcher.exe` as an administrator — it fails to switch to
+windows started from e.g. WSL unless it runs elevated. To start it elevated
+at every login without a UAC prompt, create a Task Scheduler logon task in
+an elevated cmd prompt (press WIN, type `cmd`, choose **Run as
+administrator** — not PowerShell, the quoting below is cmd-specific):
 
 ```
-schtasks /Create /TN win-app-switcher /TR "C:\path\to\win-app-switcher.exe" /SC ONLOGON /RL HIGHEST /F
+schtasks /Create /TN win-app-switcher /TR "\"C:\Program Files\win-app-switcher\win-app-switcher.exe\"" /SC ONLOGON /RL HIGHEST /F
 ```
 
 Or in the Task Scheduler GUI: Create Task → check **Run with highest
 privileges** → Triggers → **At log on**.
+
+The switcher also works as a normal user, with degradations (a tray balloon
+warns at startup): windows of elevated processes (and e.g. WSL-started
+windows) cannot be activated, process priority falls from REALTIME to HIGH
+so switching may lag under full CPU load, and WIN shortcuts pass through
+while an elevated window has focus.
+
+To remove the logon task, see [Uninstall](#uninstall).
+
+## Uninstall
+
+Exit the switcher from the tray icon, then in an elevated prompt delete the
+logon task and the install folder:
+
+```
+schtasks /Delete /TN win-app-switcher /F
+rmdir /S /Q "C:\Program Files\win-app-switcher"
+```
+
+The switcher writes nothing outside its install folder — no registry
+entries, no other files.
 
 ## Updates
 
@@ -89,4 +107,3 @@ A released exe can be verified independently: check out the tagged commit,
 run `TAG=vX.Y.Z make docker-build` (same pinned image and version stamp as
 CI), and compare `dist/win-app-switcher.exe.sha256` against the release
 asset.
-
