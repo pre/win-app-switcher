@@ -190,7 +190,7 @@ pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
 }
 
 #[cfg(windows)]
-pub use win::{start, WM_SWITCHER};
+pub use win::{inject_dummy, inject_key, start, WM_SWITCHER};
 
 #[cfg(windows)]
 mod win {
@@ -305,20 +305,28 @@ mod win {
         CallNextHookEx(None, ncode, wparam, lparam)
     }
 
-    /// Press+release VK 0xFF (unassigned) so Windows sees WIN as part of a
-    /// combo instead of a tap. No application reacts to 0xFF.
-    unsafe fn inject_dummy() {
+    /// Press+release `vk`. Injected events are skipped by our own hook, so
+    /// they always reach the foreground application untouched.
+    pub unsafe fn inject_key(vk: u16) {
         let key = |up: bool| INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(0xFF),
+                    wVk: VIRTUAL_KEY(vk),
                     dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
                     ..Default::default()
                 },
             },
         };
         let _ = SendInput(&[key(false), key(true)], std::mem::size_of::<INPUT>() as i32);
+    }
+
+    /// Press+release VK 0xFF (unassigned) so Windows sees WIN as part of a
+    /// combo instead of a tap. No application reacts to 0xFF. Also doubles
+    /// as the SetForegroundWindow unlock in [`crate::apps::activate`]: the
+    /// last-input-sender process may take the foreground.
+    pub unsafe fn inject_dummy() {
+        inject_key(0xFF);
     }
 }
 

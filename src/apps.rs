@@ -90,6 +90,7 @@ mod win {
         AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
         PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
     use windows::Win32::UI::Shell::{
         IShellItemImageFactory, IVirtualDesktopManager, SHCreateItemFromParsingName,
         VirtualDesktopManager, SIIGBF, SIIGBF_ICONONLY, SIIGBF_SCALEUP,
@@ -347,9 +348,57 @@ mod win {
         }
     }
 
+    /// Immersive shell overlays — the open Start menu, search and taskbar
+    /// jump lists / context menus — live in z-order bands above every
+    /// WS_EX_TOPMOST window, so no z-order or foreground trick can put our
+    /// dialog over them. Like any menu they dismiss on ESC, so when one
+    /// holds the foreground, send it an injected ESC (which our own hook
+    /// passes through) before taking over.
+    unsafe fn dismiss_shell_overlay() {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return;
+        }
+        let class = class_name(fg);
+        let overlay = match class.as_str() {
+            // Win11 taskbar flyouts, the taskbar's XAML host and the
+            // taskbar's own Win32 menu loop.
+            "Xaml_WindowedPopupClass" | "XamlExplorerHostIslandWindow" | "Shell_TrayWnd" => true,
+            // Start menu, search and Win10 shell flyouts host their UI in a
+            // CoreWindow of a dedicated shell process.
+            "Windows.UI.Core.CoreWindow" => {
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(fg, Some(&mut pid));
+                let name = exe_path(pid)
+                    .map(|p| p.rsplit('\\').next().unwrap_or("").to_ascii_lowercase())
+                    .unwrap_or_default();
+                #[cfg(debug_assertions)]
+                println!("foreground CoreWindow host: {name}");
+                matches!(
+                    name.as_str(),
+                    "startmenuexperiencehost.exe"
+                        | "searchhost.exe"
+                        | "searchapp.exe"
+                        | "searchui.exe"
+                        | "shellexperiencehost.exe"
+                )
+            }
+            _ => false,
+        };
+        #[cfg(debug_assertions)]
+        println!(
+            "foreground '{class}': {}",
+            if overlay { "shell overlay, inject ESC to dismiss" } else { "not a shell overlay" }
+        );
+        if overlay {
+            crate::hook::inject_key(VK_ESCAPE.0);
+        }
+    }
+
     /// Bring a window to the foreground, optionally restoring it first.
     pub fn activate(hwnd: HWND, restore_minimized: bool) {
         unsafe {
+            dismiss_shell_overlay();
             if restore_minimized && IsIconic(hwnd).as_bool() {
                 let _ = ShowWindowAsync(hwnd, SW_RESTORE);
             }
