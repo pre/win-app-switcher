@@ -63,8 +63,10 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, ChangeWindowMessageFilterEx, CreateIconIndirect, CreatePopupMenu,
         CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-        GetCursorPos, GetMessageW, KillTimer, MessageBoxW, PostMessageW, PostQuitMessage,
-        RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, TrackPopupMenu,
+        GetCursorPos, GetMessageW, GetSystemMetrics, KillTimer, MessageBoxW, PostMessageW,
+        PostQuitMessage,
+        RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SM_CXSMICON,
+        TrackPopupMenu,
         TranslateMessage, HICON, HWND_BROADCAST, ICONINFO, IDYES, MB_ICONERROR, MB_ICONQUESTION,
         MB_ICONWARNING, MB_OK, MB_YESNO, MF_STRING, MSG, MSGFLT_ALLOW, TPM_NONOTIFY,
         TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE,
@@ -541,13 +543,15 @@ mod win {
     /// Draw "§" into a 32×32 ARGB bitmap and wrap it in an HICON.
     /// Runtime GDI drawing avoids shipping and embedding an .ico resource.
     unsafe fn tray_icon() -> Result<HICON> {
-        const SIZE: i32 = 32;
+        // The size the shell actually shows (DPI-scaled in a PMv2 process):
+        // drawn 1:1, no shell rescale to soften the glyph.
+        let size = GetSystemMetrics(SM_CXSMICON).max(16);
         let dc = CreateCompatibleDC(None);
         let bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: SIZE,
-                biHeight: -SIZE, // top-down
+                biWidth: size,
+                biHeight: -size, // top-down
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -559,10 +563,10 @@ mod win {
         let color =
             CreateDIBSection(Some(dc), &bi, DIB_RGB_COLORS, &mut bits, None, 0).context("DIB")?;
         // White canvas; the glyph is drawn black and the coverage becomes alpha below.
-        std::ptr::write_bytes(bits as *mut u8, 0xFF, (SIZE * SIZE) as usize * 4);
+        std::ptr::write_bytes(bits as *mut u8, 0xFF, (size * size) as usize * 4);
         let old_bmp = SelectObject(dc, color.into());
         let font = CreateFontW(
-            -(SIZE - 4),
+            -(size - 4),
             0,
             0,
             0,
@@ -583,15 +587,15 @@ mod win {
         let mut rect = RECT {
             left: 0,
             top: 0,
-            right: SIZE,
-            bottom: SIZE,
+            right: size,
+            bottom: size,
         };
         let mut glyph: Vec<u16> = "§".encode_utf16().collect();
         DrawTextW(dc, &mut glyph, &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         let _ = GdiFlush();
         // Alpha = glyph coverage (black on white), premultiplied. Black glyph:
         // stands out on the gray/light taskbar.
-        let px = std::slice::from_raw_parts_mut(bits as *mut u32, (SIZE * SIZE) as usize);
+        let px = std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize);
         for p in px.iter_mut() {
             let a = 0xFF - (*p & 0xFF);
             *p = a << 24;
@@ -599,7 +603,7 @@ mod win {
         SelectObject(dc, old_font);
         SelectObject(dc, old_bmp);
         let _ = DeleteObject(font.into());
-        let mask = CreateBitmap(SIZE, SIZE, 1, 1, None);
+        let mask = CreateBitmap(size, size, 1, 1, None);
         let info = ICONINFO {
             fIcon: true.into(),
             hbmMask: mask,
