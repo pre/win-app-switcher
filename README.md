@@ -49,6 +49,39 @@ while an elevated window has focus.
 
 To remove the logon task, see [Uninstall](#uninstall).
 
+### If it still starts without administrator rights
+
+The "Running without administrator rights" balloon after a reboot means an
+unelevated copy started. To find out why:
+
+1. Confirm what is running: Task Manager → **Details** tab → right-click a
+   column header → **Select columns** → **Elevated** shows whether
+   `win-app-switcher.exe` is elevated.
+
+2. Check that the task ran at your logon and requests elevation:
+
+   ```
+   schtasks /Query /TN win-app-switcher /V /FO LIST
+   schtasks /Query /TN win-app-switcher /XML | findstr RunLevel
+   ```
+
+   In the first output **Last Run Time** should match your last logon and
+   **Last Result** should be `0`. The second must print
+   `<RunLevel>HighestAvailable</RunLevel>` — `LeastPrivilege` means the
+   task was created without **Run with highest privileges**; delete and
+   recreate it as above.
+
+3. Test the task alone: exit the switcher from the tray, run
+   `schtasks /Run /TN win-app-switcher`. If no warning balloon appears now,
+   the task is fine — something else starts an unelevated copy earlier at
+   logon and the task's copy exits (only one instance runs). Remove the
+   extra entry: Task Manager → **Startup apps**, and the Startup folder
+   (`WIN+R`, `shell:startup`).
+
+4. **Run with highest privileges** only elevates accounts in the
+   Administrators group — `net localgroup administrators` must list your
+   account.
+
 ## Uninstall
 
 Exit the switcher from the tray icon, then in an elevated prompt delete the
