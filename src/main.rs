@@ -246,9 +246,9 @@ mod win {
                 copy_wstr(&mut nid.szInfoTitle, "Running without administrator rights");
                 copy_wstr(
                     &mut nid.szInfo,
-                    "Run win-app-switcher as an administrator so windows launched \
-                     from WSL are included. See also README \u{201c}Start at \
-                     login\u{201d}.",
+                    "Apps launched from WSL are not included unless \
+                     win-app-switcher runs as an administrator. See also README \
+                     \u{201c}Start at login\u{201d}.",
                 );
                 let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
             }
