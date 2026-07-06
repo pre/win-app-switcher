@@ -88,6 +88,8 @@ mod win {
     const TIMER_WINLIST: usize = 1;
     /// Daily update-check timer (machines rarely reboot).
     const TIMER_UPDATE: usize = 2;
+    /// Tray-icon add retry (the shell may not be ready at logon).
+    const TIMER_TRAY: usize = 3;
     /// Posted by the update-check thread when a newer release exists.
     const WM_UPDATE: u32 = WM_APP + 3;
     /// The tag CI stamped into this build; "" on dev builds (no update check).
@@ -99,6 +101,8 @@ mod win {
     static CONFIG: OnceLock<Config> = OnceLock::new();
     /// Newer release tag found by the check thread; read on the UI thread.
     static UPDATE_TAG: Mutex<Option<String>> = Mutex::new(None);
+    /// Failed [`TIMER_TRAY`] retries, to back off after ~5 minutes.
+    static TRAY_TRIES: AtomicU32 = AtomicU32::new(0);
 
     /// A switcher session: from the first Next/Prev event to Commit/Cancel.
     /// Candidates are captured once at session start, in z-order.
@@ -232,42 +236,12 @@ mod win {
             // (we normally run elevated, the restarter may not be).
             let _ = ChangeWindowMessageFilterEx(hwnd, exit_msg, MSGFLT_ALLOW, None);
 
-            let mut nid = NOTIFYICONDATAW {
-                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: hwnd,
-                uID: TRAY_ID,
-                uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
-                uCallbackMessage: WM_TRAY,
-                // Drawn at the taskbar's DPI-scaled small-icon size: shown
-                // 1:1, no shell rescale to soften the glyph.
-                hIcon: tray_icon(icon_size(hwnd, SM_CXSMICON)).context("tray icon")?,
-                ..Default::default()
-            };
-            copy_wstr(&mut nid.szTip, &format!("win-app-switcher {}", version()));
-            Shell_NotifyIconW(NIM_ADD, &nid)
-                .ok()
-                .context("Shell_NotifyIconW")?;
-
-            // Unelevated everything still works, just degraded: priority fell
-            // back to HIGH above, and WIN shortcuts pass through while an
-            // elevated window has focus. Warn once, don't block.
-            if !is_elevated() {
-                let mut nid = NOTIFYICONDATAW {
-                    cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-                    hWnd: hwnd,
-                    uID: TRAY_ID,
-                    uFlags: NIF_INFO,
-                    dwInfoFlags: NIIF_WARNING,
-                    ..Default::default()
-                };
-                copy_wstr(&mut nid.szInfoTitle, "Running without administrator rights");
-                copy_wstr(
-                    &mut nid.szInfo,
-                    "Apps launched from WSL are not included unless \
-                     win-app-switcher runs as an administrator. See also README \
-                     \u{201c}Start at login\u{201d}.",
-                );
-                let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+            // At logon (Task Scheduler ONLOGON) the shell may still be
+            // building the taskbar and NIM_ADD fails with E_FAIL. Retry from
+            // a timer so the switcher works meanwhile — sleeping here would
+            // stall the keyboard hook once installed.
+            if !add_tray_icon(hwnd) {
+                SetTimer(Some(hwnd), TIMER_TRAY, 10_000, None);
             }
 
             crate::hook::start(hwnd);
@@ -324,6 +298,57 @@ mod win {
         }
     }
 
+    /// Add the tray icon; on first success also the unelevated-rights
+    /// balloon. At logon the shell may not be ready: NIM_ADD fails with
+    /// E_FAIL while the taskbar is missing or busy — and its internal
+    /// timeout can even fire after the icon was actually added, which the
+    /// NIM_MODIFY fallback detects. [`TIMER_TRAY`] retries until success.
+    unsafe fn add_tray_icon(hwnd: HWND) -> bool {
+        let Ok(icon) = tray_icon(icon_size(hwnd, SM_CXSMICON)) else {
+            return false;
+        };
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_ID,
+            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+            uCallbackMessage: WM_TRAY,
+            // Drawn at the taskbar's DPI-scaled small-icon size: shown
+            // 1:1, no shell rescale to soften the glyph.
+            hIcon: icon,
+            ..Default::default()
+        };
+        copy_wstr(&mut nid.szTip, &format!("win-app-switcher {}", version()));
+        let ok = Shell_NotifyIconW(NIM_ADD, &nid).as_bool()
+            || Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool();
+        // The shell copies the icon during the call; endless retries must
+        // not leak GDI objects.
+        let _ = DestroyIcon(icon);
+
+        // Unelevated everything still works, just degraded: priority fell
+        // back to HIGH, and WIN shortcuts pass through while an elevated
+        // window has focus. Warn once, don't block.
+        if ok && !is_elevated() {
+            let mut nid = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: hwnd,
+                uID: TRAY_ID,
+                uFlags: NIF_INFO,
+                dwInfoFlags: NIIF_WARNING,
+                ..Default::default()
+            };
+            copy_wstr(&mut nid.szInfoTitle, "Running without administrator rights");
+            copy_wstr(
+                &mut nid.szInfo,
+                "Apps launched from WSL are not included unless \
+                 win-app-switcher runs as an administrator. See also README \
+                 \u{201c}Start at login\u{201d}.",
+            );
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+        ok
+    }
+
     unsafe extern "system" fn wndproc(
         hwnd: HWND,
         msg: u32,
@@ -352,6 +377,16 @@ mod win {
             WM_TIMER if wparam.0 == TIMER_WINLIST => {
                 let _ = KillTimer(Some(hwnd), TIMER_WINLIST);
                 show_window_list(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == TIMER_TRAY => {
+                if add_tray_icon(hwnd) {
+                    let _ = KillTimer(Some(hwnd), TIMER_TRAY);
+                } else if TRAY_TRIES.fetch_add(1, Ordering::Relaxed) + 1 == 30 {
+                    // ~5 min of 10 s tries: back off to once a minute,
+                    // forever — switching works fine without the icon.
+                    SetTimer(Some(hwnd), TIMER_TRAY, 60_000, None);
+                }
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == TIMER_UPDATE => {
