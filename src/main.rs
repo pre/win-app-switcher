@@ -53,6 +53,9 @@ mod win {
         CreateMutexW, GetCurrentProcess, OpenProcessToken, SetPriorityClass, WaitForSingleObject,
         REALTIME_PRIORITY_CLASS,
     };
+    use windows::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
     use windows::Win32::UI::Shell::{
         Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING, NIM_ADD,
         NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
@@ -161,6 +164,10 @@ mod win {
         // Switching must stay fast under full CPU load. REALTIME needs
         // elevation; unelevated the OS silently grants HIGH instead.
         unsafe {
+            // Per-monitor DPI awareness (AAS declares PerMonitorV2 in its
+            // manifest): without it DWM bitmap-stretches the dialog on
+            // scaled displays, blurring text and icons.
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let _ = SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
             // Shell icon extraction (IShellItemImageFactory) needs COM.
             CoInitializeEx(None, COINIT_APARTMENTTHREADED)

@@ -220,3 +220,11 @@ Next/Prev event and `activate candidate i/N` on commit.
 8. The README `schtasks` recipe: after logging out and in, the switcher is
    running elevated (Task Manager shows "elevated: yes") with no UAC prompt
    and no balloon.
+
+### Per-monitor DPI
+9. On a display scaled >100% (e.g. 150%), both dialogs are sharp — text
+   and icons show no bitmap-stretch blur — and visually the same size as
+   on a 100% display.
+10. Mixed-DPI monitors, `dialog_monitor = "mouse"`: the dialog opens
+    correctly sized and centered on whichever monitor the mouse is on,
+    both ways; mouse hover still tracks the icons/rows accurately.

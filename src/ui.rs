@@ -207,6 +207,7 @@ mod win {
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, LoadCursorW, PostMessageW,
@@ -331,15 +332,11 @@ mod win {
         static DLG: RefCell<Option<Dlg>> = const { RefCell::new(None) };
     }
 
-    /// Icons are extracted once at ICON size and drawn scaled; one cache
-    /// entry per exe serves both dialogs.
-    fn icon_px(cfg: &Config) -> u32 {
-        (super::ICON * cfg.scale) as u32
-    }
-
     /// App switcher: one icon per app group.
     pub fn show(main_hwnd: HWND, groups: &[crate::apps::AppGroup], kb: usize, cfg: &Config) {
-        let px = icon_px(cfg);
+        let (work, dpi) = monitor_work_rect(cfg.dialog_monitor);
+        let scale = cfg.scale * dpi;
+        let px = (super::ICON * scale) as u32;
         let entries = groups
             .iter()
             .map(|g| Entry {
@@ -350,10 +347,10 @@ mod win {
             .collect();
         let panel = Panel::Row(Layout {
             n: groups.len(),
-            scale: cfg.scale,
+            scale,
             show_name: cfg.show_selected_name,
         });
-        open(main_hwnd, entries, panel, kb, px, cfg);
+        open(main_hwnd, entries, panel, kb, px, work, cfg);
     }
 
     /// Window switcher: one row per window of the foreground app.
@@ -365,7 +362,9 @@ mod win {
         kb: usize,
         cfg: &Config,
     ) {
-        let px = icon_px(cfg);
+        let (work, dpi) = monitor_work_rect(cfg.dialog_monitor);
+        let scale = cfg.scale * dpi;
+        let px = (super::LIST_ICON * scale) as u32;
         let icon = crate::apps::icon_bgra(icon_src, px);
         let entries = titles
             .iter()
@@ -377,16 +376,23 @@ mod win {
             .collect();
         let panel = Panel::List(ListLayout {
             n: titles.len(),
-            scale: cfg.scale,
+            scale,
         });
-        open(main_hwnd, entries, panel, kb, px, cfg);
+        open(main_hwnd, entries, panel, kb, px, work, cfg);
     }
 
     /// Open the dialog, or refresh contents and size in place if it is
     /// already open (WIN+Q removes an app group).
-    fn open(main_hwnd: HWND, entries: Vec<Entry>, panel: Panel, kb: usize, px: u32, cfg: &Config) {
+    fn open(
+        main_hwnd: HWND,
+        entries: Vec<Entry>,
+        panel: Panel,
+        kb: usize,
+        px: u32,
+        work: RECT,
+        cfg: &Config,
+    ) {
         let (w, h) = panel.size();
-        let work = monitor_work_rect(cfg.dialog_monitor);
         let x = work.left + (work.right - work.left - w) / 2;
         let y = work.top + (work.bottom - work.top - h) / 2;
         let pal = palette(cfg);
@@ -547,7 +553,11 @@ mod win {
         });
     }
 
-    fn monitor_work_rect(which: DialogMonitor) -> RECT {
+    /// Work rect of the target monitor and its DPI scale (1.0 = 96 dpi).
+    /// The process is per-monitor DPI aware (see run()), so all coordinates
+    /// are physical pixels; layouts fold the DPI scale into the user's
+    /// `scale` so the dialog has the same visual size on every monitor.
+    fn monitor_work_rect(which: DialogMonitor) -> (RECT, f32) {
         unsafe {
             let mut pt = POINT::default();
             if which == DialogMonitor::Mouse {
@@ -559,7 +569,9 @@ mod win {
                 ..Default::default()
             };
             let _ = GetMonitorInfoW(monitor, &mut info);
-            info.rcWork
+            let (mut dx, mut dy) = (96u32, 96u32);
+            let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+            (info.rcWork, dx as f32 / 96.0)
         }
     }
 

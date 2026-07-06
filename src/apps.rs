@@ -246,31 +246,40 @@ mod win {
     }
 
     /// Premultiplied BGRA pixels (px × px) of the shell icon behind a parsing
-    /// name (exe path or `shell:AppsFolder` entry, see [`icon_source`]),
-    /// cached for the process lifetime — cold extraction can take ~100 ms.
+    /// name (exe path or `shell:AppsFolder` entry, see [`icon_source`]). The
+    /// 256 px master frame is cached for the process lifetime — cold
+    /// extraction can take ~100 ms — and downscaled per request, so `px` may
+    /// differ between calls (per-monitor DPI, both dialogs).
     pub fn icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
+        const MASTER: u32 = 256;
         thread_local! {
             static CACHE: RefCell<HashMap<String, Option<Vec<u8>>>> =
                 RefCell::new(HashMap::new());
         }
-        CACHE.with_borrow_mut(|cache| {
+        let master = CACHE.with_borrow_mut(|cache| {
             cache
                 .entry(exe.to_string())
-                .or_insert_with(|| unsafe { load_icon_bgra(exe, px) })
+                .or_insert_with(|| unsafe { load_icon_bgra(exe, MASTER) })
                 .clone()
+        })?;
+        Some(if px == MASTER {
+            master
+        } else {
+            super::downscale_premul_bgra(&master, MASTER, px)
         })
     }
 
+    /// The icon's native `px` (256) frame via the shell.
     unsafe fn load_icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
         let wide: Vec<u16> = exe.encode_utf16().chain([0]).collect();
         let item: IShellItemImageFactory =
             SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>).ok()?;
-        // Ask for the 256 px frame — the icon's native high-res image, so the
-        // shell does no resampling of its own — and downscale to `px` here in
-        // premultiplied space (see downscale_premul_bgra); asking the shell
-        // for `px` directly leaves a white fringe around the edges. SCALEUP
+        // The 256 px frame is the icon's native high-res image, so the shell
+        // does no resampling of its own; callers downscale in premultiplied
+        // space (see downscale_premul_bgra) — asking the shell for the target
+        // size directly leaves a white fringe around the edges. SCALEUP
         // stretches icons that lack a 256 frame instead of padding them.
-        let src = px.max(256);
+        let src = px;
         let cx = src as i32;
         // GetImage output is AlphaBlend-ready: 32-bit premultiplied BGRA.
         let bitmap = item
@@ -301,13 +310,7 @@ mod win {
         );
         let _ = DeleteDC(dc);
         let _ = DeleteObject(bitmap.into());
-        (lines != 0).then(|| {
-            if src == px {
-                bits
-            } else {
-                super::downscale_premul_bgra(&bits, src, px)
-            }
-        })
+        (lines != 0).then_some(bits)
     }
 
     /// The foreground app's exe path and all its windows in z-order
