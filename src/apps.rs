@@ -250,12 +250,13 @@ mod win {
     /// cached for the process lifetime — cold extraction can take ~100 ms.
     pub fn icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
         thread_local! {
-            static CACHE: RefCell<HashMap<String, Option<Vec<u8>>>> =
+            // Keyed by size too: monitors can have different DPI.
+            static CACHE: RefCell<HashMap<(String, u32), Option<Vec<u8>>>> =
                 RefCell::new(HashMap::new());
         }
         CACHE.with_borrow_mut(|cache| {
             cache
-                .entry(exe.to_string())
+                .entry((exe.to_string(), px))
                 .or_insert_with(|| unsafe { load_icon_bgra(exe, px) })
                 .clone()
         })
@@ -358,6 +359,17 @@ mod win {
             let _ = SetForegroundWindow(hwnd);
             if let Some(tid) = attached {
                 let _ = AttachThreadInput(GetCurrentThreadId(), tid, false);
+            }
+            // The attach dance fails against immersive shell surfaces (open
+            // Start menu, search, taskbar jump lists), which also live in a
+            // z-band above any WS_EX_TOPMOST window, so a failed activation
+            // leaves the dialog drawn underneath them. Injecting a key makes
+            // this process the last input sender, which re-arms
+            // SetForegroundWindow; once we are foreground the shell surface
+            // dismisses itself.
+            if GetForegroundWindow() != hwnd {
+                crate::hook::inject_dummy();
+                let _ = SetForegroundWindow(hwnd);
             }
         }
     }

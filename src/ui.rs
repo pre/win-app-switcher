@@ -202,9 +202,10 @@ mod win {
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetMonitorInfoW,
         MonitorFromPoint, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, MONITORINFO,
+        BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR, MONITORINFO,
         MONITOR_DEFAULTTOPRIMARY,
     };
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
@@ -331,15 +332,22 @@ mod win {
         static DLG: RefCell<Option<Dlg>> = const { RefCell::new(None) };
     }
 
-    /// Icons are extracted once at ICON size and drawn scaled; one cache
-    /// entry per exe serves both dialogs.
-    fn icon_px(cfg: &Config) -> u32 {
-        (super::ICON * cfg.scale) as u32
+    /// Configured scale × the dialog monitor's DPI scale: the factor between
+    /// layout units and physical pixels.
+    fn dialog_scale(cfg: &Config) -> f32 {
+        cfg.scale * monitor_scale(cfg.dialog_monitor)
+    }
+
+    /// Icons are extracted at the size they are drawn at, so the row shows
+    /// them 1:1 pixel-exact.
+    fn icon_px(scale: f32) -> u32 {
+        (super::ICON * scale) as u32
     }
 
     /// App switcher: one icon per app group.
     pub fn show(main_hwnd: HWND, groups: &[crate::apps::AppGroup], kb: usize, cfg: &Config) {
-        let px = icon_px(cfg);
+        let scale = dialog_scale(cfg);
+        let px = icon_px(scale);
         let entries = groups
             .iter()
             .map(|g| Entry {
@@ -350,7 +358,7 @@ mod win {
             .collect();
         let panel = Panel::Row(Layout {
             n: groups.len(),
-            scale: cfg.scale,
+            scale,
             show_name: cfg.show_selected_name,
         });
         open(main_hwnd, entries, panel, kb, px, cfg);
@@ -365,7 +373,8 @@ mod win {
         kb: usize,
         cfg: &Config,
     ) {
-        let px = icon_px(cfg);
+        let scale = dialog_scale(cfg);
+        let px = icon_px(scale);
         let icon = crate::apps::icon_bgra(icon_src, px);
         let entries = titles
             .iter()
@@ -377,7 +386,7 @@ mod win {
             .collect();
         let panel = Panel::List(ListLayout {
             n: titles.len(),
-            scale: cfg.scale,
+            scale,
         });
         open(main_hwnd, entries, panel, kb, px, cfg);
     }
@@ -547,20 +556,37 @@ mod win {
         });
     }
 
-    fn monitor_work_rect(which: DialogMonitor) -> RECT {
+    fn dialog_monitor(which: DialogMonitor) -> HMONITOR {
         unsafe {
             let mut pt = POINT::default();
             if which == DialogMonitor::Mouse {
                 let _ = GetCursorPos(&mut pt);
             }
-            let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+            MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY)
+        }
+    }
+
+    fn monitor_work_rect(which: DialogMonitor) -> RECT {
+        unsafe {
             let mut info = MONITORINFO {
                 cbSize: std::mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
             };
-            let _ = GetMonitorInfoW(monitor, &mut info);
+            let _ = GetMonitorInfoW(dialog_monitor(which), &mut info);
             info.rcWork
         }
+    }
+
+    /// The dialog monitor's display scale (1.0 = 96 DPI). The process is
+    /// per-monitor DPI aware, so the configured scale is multiplied by this
+    /// to keep the dialog its intended physical size — rendered pixel-true
+    /// instead of DWM-stretched.
+    fn monitor_scale(which: DialogMonitor) -> f32 {
+        let (mut dx, mut dy) = (96u32, 96u32);
+        unsafe {
+            let _ = GetDpiForMonitor(dialog_monitor(which), MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        }
+        dx as f32 / 96.0
     }
 
     fn mouse_coords(lparam: LPARAM) -> (i32, i32) {
@@ -719,6 +745,13 @@ mod win {
         D2D_RECT_F { left: r[0], top: r[1], right: r[2], bottom: r[3] }
     }
 
+    /// Snap a rect to whole pixels: non-integer scales put layout rects on
+    /// fractional coordinates, which resamples icons and shifts glyph runs
+    /// off the pixel grid — both read as blur.
+    fn snap(r: [f32; 4]) -> [f32; 4] {
+        r.map(f32::round)
+    }
+
     fn rounded(r: [f32; 4], radius: f32) -> D2D1_ROUNDED_RECT {
         D2D1_ROUNDED_RECT { rect: rect(r), radiusX: radius, radiusY: radius }
     }
@@ -762,7 +795,7 @@ mod win {
     unsafe fn draw_row(x: &D2d, l: &Layout, entries: &[Entry], sel: usize, pal: &Palette) {
         let radius = 10.0 * l.scale;
         x.brush.SetColor(&pal.hilite);
-        x.rt.FillRoundedRectangle(&rounded(l.cell(sel), radius), &x.brush);
+        x.rt.FillRoundedRectangle(&rounded(snap(l.cell(sel)), radius), &x.brush);
         for (i, bitmap) in x.bitmaps.iter().enumerate() {
             draw_icon(x, bitmap, l.icon(i), radius, pal);
         }
@@ -773,7 +806,7 @@ mod win {
                 x.rt.DrawText(
                     &entry.name,
                     &x.text,
-                    &rect(l.label(sel)),
+                    &rect(snap(l.label(sel))),
                     &x.brush,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
                     DWRITE_MEASURING_MODE_GDI_CLASSIC,
@@ -785,7 +818,7 @@ mod win {
     unsafe fn draw_list(x: &D2d, l: &ListLayout, entries: &[Entry], sel: usize, pal: &Palette) {
         let radius = 8.0 * l.scale;
         x.brush.SetColor(&pal.hilite);
-        x.rt.FillRoundedRectangle(&rounded(l.row(sel), radius), &x.brush);
+        x.rt.FillRoundedRectangle(&rounded(snap(l.row(sel)), radius), &x.brush);
         let _ = x.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         for (i, entry) in entries.iter().enumerate() {
             draw_icon(x, &x.bitmaps[i], l.icon(i), 6.0 * l.scale, pal);
@@ -793,7 +826,7 @@ mod win {
             x.rt.DrawText(
                 &entry.name,
                 &x.text,
-                &rect(l.name(i)),
+                &rect(snap(l.name(i))),
                 &x.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_GDI_CLASSIC,
@@ -802,7 +835,7 @@ mod win {
             x.rt.DrawText(
                 &entry.title,
                 &x.text,
-                &rect(l.title(i)),
+                &rect(snap(l.title(i))),
                 &x.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_GDI_CLASSIC,
@@ -817,6 +850,7 @@ mod win {
         radius: f32,
         pal: &Palette,
     ) {
+        let r = snap(r);
         match bitmap {
             Some(b) => x.rt.DrawBitmap(
                 b,

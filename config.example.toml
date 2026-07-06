@@ -5,7 +5,7 @@
 # Dialog theme: "auto" follows Windows light/dark mode. ("auto" | "light" | "dark")
 #theme = "auto"
 
-# Dialog size multiplier.
+# Dialog size multiplier, applied on top of the monitor's display scaling.
 #scale = 1.0
 
 # Show the selected application's name under its icon.
