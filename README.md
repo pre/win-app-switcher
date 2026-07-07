@@ -29,10 +29,16 @@ How it differs from the built-in alt-tab:
 ## Start at login
 
 Run `win-app-switcher.exe` as an administrator — it fails to switch to
-windows started from e.g. WSL unless it runs elevated. To start it elevated
-at every login without a UAC prompt, create a Task Scheduler logon task in
-an elevated cmd prompt (press WIN, type `cmd`, choose **Run as
-administrator** — not PowerShell, the quoting below is cmd-specific):
+windows started from e.g. WSL unless it runs elevated.
+
+> **Not in the Administrators group?** The logon task below cannot elevate
+> a standard account, no matter how it is configured — use the
+> [startup shortcut](#standard-user-accounts) instead.
+
+To start it elevated at every login without a UAC prompt, create a Task
+Scheduler logon task in an elevated cmd prompt (press WIN, type `cmd`,
+choose **Run as administrator** — not PowerShell, the quoting below is
+cmd-specific):
 
 ```
 schtasks /Create /TN win-app-switcher /TR "\"C:\Program Files\win-app-switcher\win-app-switcher.exe\"" /SC ONLOGON /RL HIGHEST /F
@@ -48,6 +54,27 @@ so switching may lag under full CPU load, and WIN shortcuts pass through
 while an elevated window has focus.
 
 To remove the logon task, see [Uninstall](#uninstall).
+
+### Standard user accounts
+
+**Run with highest privileges** only elevates accounts in the
+Administrators group; for a standard account the task silently starts an
+unelevated copy. UAC offers no silent elevation for standard accounts — the
+closest thing is a Startup shortcut that asks for administrator credentials
+at every logon:
+
+1. Delete the logon task if one exists (elevated prompt:
+   `schtasks /Delete /TN win-app-switcher /F`) — otherwise its unelevated
+   copy races the shortcut's copy at every logon.
+2. Download `install-startup-shortcut.cmd` from the
+   [latest release](../../releases/latest) and double-click it as the
+   account that logs in (no elevation needed). It creates
+   `win-app-switcher.lnk` in the Startup folder.
+
+At every logon UAC then asks for administrator credentials and the switcher
+starts elevated; **Cancel** starts it unelevated with the degradations
+above. To undo, delete `win-app-switcher.lnk` from the Startup folder
+(`WIN+R`, `shell:startup`).
 
 ### If it still starts without administrator rights
 
@@ -80,7 +107,10 @@ unelevated copy started. To find out why:
 
 4. **Run with highest privileges** only elevates accounts in the
    Administrators group — `net localgroup administrators` must list your
-   account.
+   account. Check `whoami /groups` in a normal window: an elevated prompt
+   opened with another account's credentials reports that account's groups,
+   not yours. If your account cannot be added to the group, use the
+   [startup shortcut](#standard-user-accounts).
 
 ## Uninstall
 
@@ -91,6 +121,10 @@ logon task and the install folder:
 schtasks /Delete /TN win-app-switcher /F
 rmdir /S /Q "C:\Program Files\win-app-switcher"
 ```
+
+If you used the [startup shortcut](#standard-user-accounts) instead of the
+logon task, delete `win-app-switcher.lnk` from the Startup folder (`WIN+R`,
+`shell:startup`) as the account that created it.
 
 The switcher writes nothing outside its install folder — no registry
 entries, no other files.
@@ -127,7 +161,8 @@ bin/release-github v1.2.3
 This drafts a GitHub release pinned to HEAD (notes generated from
 conventional commits) and dispatches the release workflow, which tests and
 builds `win-app-switcher.exe` in the pinned Rust image and attaches it
-(+ `.sha256`, `config.example.toml`) to the draft. Wait for the assets to
+(+ `.sha256`, `config.example.toml`, `install-startup-shortcut.cmd`) to the
+draft. Wait for the assets to
 appear, review the draft in the browser, then press **Publish release** —
 publishing creates the git tag.
 
