@@ -114,17 +114,13 @@ unelevated copy started. To find out why:
 
 ## Uninstall
 
-Exit the switcher from the tray icon, then in an elevated prompt delete the
-logon task and the install folder:
+Run [`scripts/uninstall.cmd`](scripts/uninstall.cmd) from an elevated
+prompt. It exits the switcher, deletes the logon task, the install folder,
+and the current account's [startup shortcut](#standard-user-accounts).
 
-```
-schtasks /Delete /TN win-app-switcher /F
-rmdir /S /Q "C:\Program Files\win-app-switcher"
-```
-
-If you used the [startup shortcut](#standard-user-accounts) instead of the
-logon task, delete `win-app-switcher.lnk` from the Startup folder (`WIN+R`,
-`shell:startup`) as the account that created it.
+If the startup shortcut was created by a different account, delete
+`win-app-switcher.lnk` from the Startup folder (`WIN+R`, `shell:startup`)
+as that account.
 
 The switcher writes nothing outside its install folder — no registry
 entries, no other files.
@@ -161,8 +157,8 @@ bin/release-github v1.2.3
 This drafts a GitHub release pinned to HEAD (notes generated from
 conventional commits) and dispatches the release workflow, which tests and
 builds `win-app-switcher.exe` in the pinned Rust image and attaches it
-(+ `.sha256`, `config.example.toml`, `install-startup-shortcut.cmd`) to the
-draft. Wait for the assets to
+(+ `.sha256`, `config.example.toml`, `install-startup-shortcut.cmd`,
+`uninstall.cmd`) to the draft. Wait for the assets to
 appear, review the draft in the browser, then press **Publish release** —
 publishing creates the git tag.
 

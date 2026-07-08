@@ -56,4 +56,5 @@ jobs:
             dist/win-app-switcher.exe.sha256 \
             config.example.toml \
             scripts/install-startup-shortcut.cmd \
+            scripts/uninstall.cmd \
             --repo "$GITHUB_REPOSITORY" --clobber
