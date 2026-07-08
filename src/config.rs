@@ -35,6 +35,7 @@ pub struct Config {
     pub dialog_monitor: DialogMonitor,
     pub dialog_delay_ms: u32,
     pub check_updates: bool,
+    pub notify_updates: bool,
 }
 
 impl Default for Config {
@@ -48,6 +49,7 @@ impl Default for Config {
             dialog_monitor: DialogMonitor::Mouse,
             dialog_delay_ms: 150,
             check_updates: true,
+            notify_updates: true,
         }
     }
 }
@@ -113,6 +115,7 @@ mod tests {
             dialog_monitor = "primary"
             dialog_delay_ms = 300
             check_updates = false
+            notify_updates = false
             "#,
         )
         .unwrap();
@@ -124,6 +127,7 @@ mod tests {
         assert_eq!(cfg.dialog_monitor, DialogMonitor::Primary);
         assert_eq!(cfg.dialog_delay_ms, 300);
         assert!(!cfg.check_updates);
+        assert!(!cfg.notify_updates);
     }
 
     #[test]

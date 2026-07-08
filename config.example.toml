@@ -26,3 +26,7 @@
 
 # Check GitHub daily for a newer release and notify from the tray.
 #check_updates = true
+
+# Show a tray notification when a newer release is found.
+# With false, a pending update is shown only in the tray menu.
+#notify_updates = true

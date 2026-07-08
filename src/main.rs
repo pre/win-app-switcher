@@ -84,6 +84,7 @@ mod win {
     const TRAY_ID: u32 = 1;
     const CMD_QUIT: usize = 1;
     const CMD_UPDATE: usize = 2;
+    const CMD_VERSION: usize = 3;
     /// Timer that opens the WIN+§ list dialog after `dialog_delay_ms`.
     const TIMER_WINLIST: usize = 1;
     /// Daily update-check timer (machines rarely reboot).
@@ -95,6 +96,7 @@ mod win {
     /// The tag CI stamped into this build; "" on dev builds (no update check).
     const RELEASE_TAG: &str = env!("RELEASE_TAG");
     const RELEASES_URL: PCWSTR = w!("https://github.com/pre/win-app-switcher/releases/latest");
+    const RELEASES_LIST_URL: PCWSTR = w!("https://github.com/pre/win-app-switcher/releases");
 
     /// Broadcast "please exit" message id, registered before the window exists.
     static EXIT_MSG: AtomicU32 = AtomicU32::new(0);
@@ -364,7 +366,7 @@ mod win {
                 // Only the update balloon leads anywhere; the unelevated
                 // warning balloon just dismisses.
                 if UPDATE_TAG.lock().unwrap().is_some() {
-                    open_releases_page();
+                    open_url(RELEASES_URL);
                 }
                 LRESULT(0)
             }
@@ -394,7 +396,10 @@ mod win {
                 LRESULT(0)
             }
             m if m == WM_UPDATE => {
-                notify_update(hwnd);
+                // With notifications off the update still shows in the menu.
+                if CONFIG.get().is_none_or(|c| c.notify_updates) {
+                    notify_update(hwnd);
+                }
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -601,6 +606,10 @@ mod win {
                 format!("Update available: {tag}").encode_utf16().chain([0]).collect();
             let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, PCWSTR(wide.as_ptr()));
         }
+        let suffix = if UPDATE_TAG.lock().unwrap().is_some() { " (update available)" } else { "" };
+        let version: Vec<u16> =
+            format!("Version {}{suffix}", version()).encode_utf16().chain([0]).collect();
+        let _ = AppendMenuW(menu, MF_STRING, CMD_VERSION, PCWSTR(version.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit"));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -620,7 +629,8 @@ mod win {
             CMD_QUIT => {
                 let _ = DestroyWindow(hwnd);
             }
-            CMD_UPDATE => open_releases_page(),
+            CMD_UPDATE => open_url(RELEASES_URL),
+            CMD_VERSION => open_url(RELEASES_LIST_URL),
             _ => {}
         }
     }
@@ -682,8 +692,8 @@ mod win {
         copy_wstr(&mut nid.szInfoTitle, &format!("Update available: {tag}"));
         copy_wstr(
             &mut nid.szInfo,
-            "Click to open the release page. Set check_updates = false in \
-             config.toml to disable this check.",
+            "Click to open the release page. Set notify_updates = false in \
+             config.toml to disable this notification.",
         );
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
@@ -694,9 +704,9 @@ mod win {
         }
     }
 
-    fn open_releases_page() {
+    fn open_url(url: PCWSTR) {
         unsafe {
-            ShellExecuteW(None, w!("open"), RELEASES_URL, None, None, SW_SHOWNORMAL);
+            ShellExecuteW(None, w!("open"), url, None, None, SW_SHOWNORMAL);
         }
     }
 
