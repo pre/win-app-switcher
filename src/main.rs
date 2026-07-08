@@ -95,8 +95,7 @@ mod win {
     const WM_UPDATE: u32 = WM_APP + 3;
     /// The tag CI stamped into this build; "" on dev builds (no update check).
     const RELEASE_TAG: &str = env!("RELEASE_TAG");
-    const RELEASES_URL: PCWSTR = w!("https://github.com/pre/win-app-switcher/releases/latest");
-    const RELEASES_LIST_URL: PCWSTR = w!("https://github.com/pre/win-app-switcher/releases");
+    const RELEASES_LATEST_URL: PCWSTR = w!("https://github.com/pre/win-app-switcher/releases/latest");
 
     /// Broadcast "please exit" message id, registered before the window exists.
     static EXIT_MSG: AtomicU32 = AtomicU32::new(0);
@@ -366,7 +365,7 @@ mod win {
                 // Only the update balloon leads anywhere; the unelevated
                 // warning balloon just dismisses.
                 if UPDATE_TAG.lock().unwrap().is_some() {
-                    open_url(RELEASES_URL);
+                    open_url(RELEASES_LATEST_URL);
                 }
                 LRESULT(0)
             }
@@ -629,8 +628,8 @@ mod win {
             CMD_QUIT => {
                 let _ = DestroyWindow(hwnd);
             }
-            CMD_UPDATE => open_url(RELEASES_URL),
-            CMD_VERSION => open_url(RELEASES_LIST_URL),
+            CMD_UPDATE => open_url(RELEASES_LATEST_URL),
+            CMD_VERSION => open_url(RELEASES_LATEST_URL),
             _ => {}
         }
     }
