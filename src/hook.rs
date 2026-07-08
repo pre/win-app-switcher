@@ -10,9 +10,11 @@
 //! - On session start a dummy key (VK 0xFF, unassigned) is injected while WIN
 //!   is still down, so Windows sees WIN as a combo, not a tap: the Start menu
 //!   never opens on release. Same trick as AltAppSwitcher/PowerToys.
-//! - ponytail: no RestoreKey-style stuck-key sweep — WIN passes through both
-//!   ways and watched keys are swallowed symmetrically, so nothing can stick
-//!   by construction. Port AAS RestoreKey if manual testing proves otherwise.
+//! - A WIN key-up can vanish entirely: WIN+L switches to the secure desktop
+//!   (UAC prompts too; unelevated, an elevated window taking focus does the
+//!   same) before the release reaches the hook, leaving `win_down` stuck so
+//!   a bare TAB opens the switcher. [`reconcile_win`] re-checks the OS key
+//!   state before any non-WIN key is stepped and cancels a zombie session.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -90,6 +92,23 @@ const PASS: Actions = Actions {
     event: None,
     inject_dummy: false,
 };
+
+/// Clear a stale `win_down` when the OS says the WIN key is physically up:
+/// the key-up event is eaten whenever the secure desktop takes over (WIN+L,
+/// UAC) or, unelevated, while an elevated window holds focus. Returns true
+/// when this kills an active session, so the caller can post
+/// [`Event::Cancel`] to close the zombie dialog. Call before stepping any
+/// non-WIN key.
+/// ponytail: the opposite direction (missed WIN down) is left alone — WIN+TAB
+/// then just does the OS default once, and trusting GetAsyncKeyState to set
+/// win_down would fire on WIN events injected by other software.
+pub fn reconcile_win(s: &mut State, physically_down: bool) -> bool {
+    if !s.win_down || physically_down {
+        return false;
+    }
+    s.win_down = false;
+    std::mem::replace(&mut s.mode, Mode::None) != Mode::None
+}
 
 pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
     // Tracked across sessions: a Q/W already held when a session starts (or
@@ -194,7 +213,7 @@ pub use win::{inject_dummy, inject_key, start, WM_SWITCHER};
 
 #[cfg(windows)]
 mod win {
-    use super::{step, Key, State, IDLE};
+    use super::{reconcile_win, step, Event, Key, State, IDLE};
     use std::sync::atomic::{AtomicIsize, Ordering};
     use std::sync::Mutex;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -262,7 +281,30 @@ mod win {
                 let up = kb.flags.contains(LLKHF_UP);
                 if let Some(key) = map_key(kb.vkCode, kb.scanCode) {
                     let shift = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-                    let actions = step(&mut STATE.lock().unwrap(), key, up, shift);
+                    let mut state = STATE.lock().unwrap();
+                    // The WIN key-up never arrives when the secure desktop
+                    // takes over mid-hold (WIN+L, UAC): win_down would stay
+                    // stuck and a bare TAB would open the switcher. The OS
+                    // async state never misses the release, so re-check it.
+                    // Not queried for WIN's own events: the state for the key
+                    // being processed lags the hook.
+                    if state.win_down && key != Key::Win {
+                        let phys = [VK_LWIN, VK_RWIN].iter().any(|vk| {
+                            (GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000) != 0
+                        });
+                        if reconcile_win(&mut state, phys) {
+                            #[cfg(debug_assertions)]
+                            println!("stale WIN down: key-up was never seen, cancelling session");
+                            let hwnd = HWND(MAIN_HWND.load(Ordering::Relaxed) as *mut _);
+                            let _ = PostMessageW(
+                                Some(hwnd),
+                                WM_SWITCHER,
+                                WPARAM(Event::Cancel as usize),
+                                LPARAM(0),
+                            );
+                        }
+                    }
+                    let actions = step(&mut state, key, up, shift);
                     #[cfg(debug_assertions)]
                     {
                         let mut verdict =
@@ -517,6 +559,35 @@ mod tests {
             step(&mut s, Key::W, false, false).event,
             Some(Event::CloseWindow)
         );
+    }
+
+    #[test]
+    fn stale_win_down_reconciles_from_os_state() {
+        // WIN down seen, WIN up eaten by the lock screen (WIN+L): the state
+        // claims win_down but the OS says the key is up.
+        let mut s = IDLE;
+        step(&mut s, Key::Win, false, false);
+        assert!(!reconcile_win(&mut s, false), "no session: nothing to cancel");
+        assert!(!s.win_down);
+        // TAB now passes through instead of opening the switcher.
+        let a = step(&mut s, Key::Tab, false, false);
+        assert!(!a.swallow && a.event.is_none());
+
+        // Same mid-session: the zombie dialog must be cancelled.
+        let mut s = IDLE;
+        step(&mut s, Key::Win, false, false);
+        step(&mut s, Key::Tab, false, false);
+        assert!(reconcile_win(&mut s, false));
+        assert_eq!(s.mode, Mode::None);
+        assert!(!s.win_down);
+
+        // WIN really held: reconcile must not touch anything.
+        let mut s = IDLE;
+        step(&mut s, Key::Win, false, false);
+        step(&mut s, Key::Tab, false, false);
+        assert!(!reconcile_win(&mut s, true));
+        assert_eq!(s.mode, Mode::App);
+        assert!(s.win_down);
     }
 
     #[test]
