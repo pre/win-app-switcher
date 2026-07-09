@@ -55,7 +55,7 @@ RANGE="${PREV_TAG:+$PREV_TAG..}HEAD"
 SUBJECTS="$(git log --no-merges --pretty='%s' "$RANGE")"
 [[ -n "$SUBJECTS" ]] || { echo "no new commits since ${PREV_TAG:-start}; nothing to release" >&2; exit 1; }
 
-NOTES=""
+NOTES="Installation: Copy \`win-app-switcher.exe\` to \`C:\Program Files\win-app-switcher\`"$'\n\n'
 section() { # append a "## title" section with subjects matching the prefix regex
   local title="$1" re="$2" body
   body="$(grep -E "$re" <<<"$SUBJECTS" | sed -E 's/^[a-z]+(\([^)]*\))?!?: */- /' || true)"

@@ -12,6 +12,10 @@ How it differs from the built-in alt-tab:
 
 <img width="1000" height="718" alt="Win App Switcher Introduction" src="https://github.com/user-attachments/assets/59e1e8b0-fb8a-43ee-a6dc-bcbef6c3192b" />
 
+**Installation:** Copy `win-app-switcher.exe` from the
+[latest release](../../releases/latest) to
+`C:\Program Files\win-app-switcher`.
+
 ## Keys
 
 | Input | Action |
