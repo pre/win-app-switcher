@@ -790,6 +790,26 @@ mod win {
         (r >= 0).then_some((l, t, r, b))
     }
 
+    /// DC + bitmaps of [`tray_icon`], freed on drop so its `?` exits leak
+    /// nothing — the tray retry timer calls it forever. DC first: deleting
+    /// it deselects a still-selected bitmap, which DeleteObject rejects
+    /// (the order `D2d::drop` in ui.rs already relies on).
+    struct Gdi {
+        dc: HDC,
+        bmps: Vec<HBITMAP>,
+    }
+
+    impl Drop for Gdi {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.dc);
+                for bmp in self.bmps.drain(..) {
+                    let _ = DeleteObject(bmp.into());
+                }
+            }
+        }
+    }
+
     /// Draw "⌘" into a size×size ARGB bitmap and wrap it in an HICON.
     /// Runtime GDI drawing avoids shipping and embedding an .ico resource.
     /// A glyph's ink is a font-specific fraction of the em, so draw once on
@@ -797,13 +817,14 @@ mod win {
     /// the ink fills the icon box.
     unsafe fn tray_icon(size: i32) -> Result<HICON> {
         let size = size.max(16);
-        let dc = CreateCompatibleDC(None);
+        let mut g = Gdi { dc: CreateCompatibleDC(None), bmps: Vec::new() };
 
         // Measurement pass at em = size on a 2×2-em scratch canvas — the
         // line box exceeds the em, and clipped ink would skew the numbers.
-        let (scratch, sbits) = white_canvas(dc, size * 2)?;
-        let old_bmp = SelectObject(dc, scratch.into());
-        draw_glyph(dc, size, 0, 0);
+        let (scratch, sbits) = white_canvas(g.dc, size * 2)?;
+        g.bmps.push(scratch);
+        let old_bmp = SelectObject(g.dc, scratch.into());
+        draw_glyph(g.dc, size, 0, 0);
         let spx = std::slice::from_raw_parts(sbits, ((size * 2) * (size * 2)) as usize);
         let (l, t, r, b) = ink_bbox(spx, size * 2).context("blank glyph")?;
 
@@ -814,10 +835,10 @@ mod win {
         let dx = (size - (r - l + 1) * em / size) / 2 - l * em / size;
         let dy = (size - (b - t + 1) * em / size) / 2 - t * em / size;
 
-        let (color, bits) = white_canvas(dc, size)?;
-        SelectObject(dc, color.into());
-        let _ = DeleteObject(scratch.into());
-        draw_glyph(dc, em, dx, dy);
+        let (color, bits) = white_canvas(g.dc, size)?;
+        g.bmps.push(color);
+        SelectObject(g.dc, color.into());
+        draw_glyph(g.dc, em, dx, dy);
 
         // Alpha = glyph coverage (black on white), premultiplied. Black glyph:
         // stands out on the gray/light taskbar.
@@ -826,18 +847,17 @@ mod win {
             let a = 0xFF - (*p & 0xFF);
             *p = a << 24;
         }
-        SelectObject(dc, old_bmp);
+        SelectObject(g.dc, old_bmp);
         let mask = CreateBitmap(size, size, 1, 1, None);
+        g.bmps.push(mask);
         let info = ICONINFO {
             fIcon: true.into(),
             hbmMask: mask,
             hbmColor: color,
             ..Default::default()
         };
+        // CreateIconIndirect copies the bitmaps; g frees the originals.
         let icon = CreateIconIndirect(&info);
-        let _ = DeleteObject(mask.into());
-        let _ = DeleteObject(color.into());
-        let _ = DeleteDC(dc);
-        Ok(icon.context("CreateIconIndirect")?)
+        icon.context("CreateIconIndirect")
     }
 }
