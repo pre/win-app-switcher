@@ -72,6 +72,7 @@ mod win {
     use super::group_by_key;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
     use windows::core::{w, BOOL, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
         CloseHandle, ERROR_SUCCESS, HWND, LPARAM, LRESULT, SIZE, WPARAM,
@@ -250,18 +251,27 @@ mod win {
     /// name (exe path or `shell:AppsFolder` entry, see [`icon_source`]). The
     /// 256 px master frame is cached for the process lifetime — cold
     /// extraction can take ~100 ms — and downscaled per request, so `px` may
-    /// differ between calls (per-monitor DPI, both dialogs).
+    /// differ between calls (per-monitor DPI, both dialogs). A failure is
+    /// retried after `RETRY_FAILED`: quick enough to recover from a transient
+    /// failure (shell not ready at logon) without re-probing a slow-failing
+    /// path (dead network share) on every dialog open.
     pub fn icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
         const MASTER: u32 = 256;
+        const RETRY_FAILED: Duration = Duration::from_secs(60);
         thread_local! {
-            static CACHE: RefCell<HashMap<String, Option<Vec<u8>>>> =
+            // Ok = icon, Err = when extraction last failed.
+            static CACHE: RefCell<HashMap<String, Result<Vec<u8>, Instant>>> =
                 RefCell::new(HashMap::new());
         }
         let master = CACHE.with_borrow_mut(|cache| {
-            cache
-                .entry(exe.to_string())
-                .or_insert_with(|| unsafe { load_icon_bgra(exe, MASTER) })
-                .clone()
+            match cache.get(exe) {
+                Some(Ok(v)) => return Some(v.clone()),
+                Some(Err(t)) if t.elapsed() < RETRY_FAILED => return None,
+                _ => {}
+            }
+            let loaded = unsafe { load_icon_bgra(exe, MASTER) };
+            cache.insert(exe.to_string(), loaded.clone().ok_or_else(Instant::now));
+            loaded
         })?;
         Some(if px == MASTER {
             master
