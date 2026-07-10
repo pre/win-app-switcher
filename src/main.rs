@@ -83,7 +83,6 @@ mod win {
     const WM_TRAY: u32 = WM_APP + 1;
     const TRAY_ID: u32 = 1;
     const CMD_QUIT: usize = 1;
-    const CMD_UPDATE: usize = 2;
     const CMD_VERSION: usize = 3;
     /// Timer that opens the WIN+§ list dialog after `dialog_delay_ms`.
     const TIMER_WINLIST: usize = 1;
@@ -600,11 +599,6 @@ mod win {
 
     unsafe fn show_tray_menu(hwnd: HWND) {
         let Ok(menu) = CreatePopupMenu() else { return };
-        if let Some(tag) = UPDATE_TAG.lock().unwrap().as_deref() {
-            let wide: Vec<u16> =
-                format!("Update available: {tag}").encode_utf16().chain([0]).collect();
-            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, PCWSTR(wide.as_ptr()));
-        }
         let suffix = if UPDATE_TAG.lock().unwrap().is_some() { " (update available)" } else { "" };
         let version: Vec<u16> =
             format!("Version {}{suffix}", version()).encode_utf16().chain([0]).collect();
@@ -628,7 +622,6 @@ mod win {
             CMD_QUIT => {
                 let _ = DestroyWindow(hwnd);
             }
-            CMD_UPDATE => open_url(RELEASES_LATEST_URL),
             CMD_VERSION => open_url(RELEASES_LATEST_URL),
             _ => {}
         }
