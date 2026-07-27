@@ -113,12 +113,17 @@ mod win {
         GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
     };
     use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
-    use windows::Win32::System::Com::{CoCreateInstance, IBindCtx, CLSCTX_ALL};
+    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+    use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, IBindCtx, CLSCTX_ALL};
     use windows::Win32::System::Threading::{
         AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
         PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+    use windows::Win32::UI::Shell::PropertiesSystem::{
+        IPropertyStore, SHGetPropertyStoreForWindow,
+    };
     use windows::Win32::UI::Shell::{
         IShellItemImageFactory, IVirtualDesktopManager, SHCreateItemFromParsingName,
         VirtualDesktopManager, SIIGBF, SIIGBF_ICONONLY, SIIGBF_SCALEUP,
@@ -193,18 +198,30 @@ mod win {
             .collect()
     }
 
-    /// Shell parsing name whose icon represents the app: packaged (UWP)
-    /// processes resolve through their `shell:AppsFolder` entry — their exe
-    /// under WindowsApps yields a blank icon — all others through the exe
-    /// path itself.
+    /// Shell parsing name whose icon represents the app: an app with an
+    /// AppUserModelID (a packaged UWP process, or a Chrome/Edge PWA that tags
+    /// its window) resolves through its `shell:AppsFolder` entry, which
+    /// carries the app's real icon. The exe alone yields a blank icon for UWP
+    /// and the generic browser icon for a PWA. Everything else resolves
+    /// through the exe path itself.
     pub fn icon_source(hwnd: HWND, exe: &str) -> String {
-        unsafe { app_user_model_id(hwnd) }
+        unsafe { window_aumid(hwnd) }
             .map(|id| format!("shell:AppsFolder\\{id}"))
             .unwrap_or_else(|| exe.to_string())
     }
 
-    /// AUMID of the process owning the window; `None` for plain Win32 apps.
-    unsafe fn app_user_model_id(hwnd: HWND) -> Option<String> {
+    /// AppUserModelID identifying the app behind a window, or `None` for a
+    /// plain Win32 app. Two sources, in order: the owning process's packaged
+    /// identity (UWP), then the window's own property store — Chrome and Edge
+    /// stamp each PWA window with `PKEY_AppUserModel_ID`, which is how the
+    /// taskbar pins and icons a PWA apart from the browser.
+    unsafe fn window_aumid(hwnd: HWND) -> Option<String> {
+        process_aumid(hwnd).or_else(|| window_prop_aumid(hwnd))
+    }
+
+    /// AUMID from the owning process's packaged identity; `None` for
+    /// unpackaged processes (plain Win32, Chrome, Electron apps).
+    unsafe fn process_aumid(hwnd: HWND) -> Option<String> {
         let proc = OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION,
             false,
@@ -217,6 +234,21 @@ mod win {
         let _ = CloseHandle(proc);
         // len counts the terminating NUL.
         (res == ERROR_SUCCESS && len > 1).then(|| String::from_utf16_lossy(&buf[..len as usize - 1]))
+    }
+
+    /// AUMID stamped on the window's property store under
+    /// `PKEY_AppUserModel_ID`. Chrome and Edge set this per PWA window so the
+    /// shell treats each PWA as its own app; ordinary browser windows leave it
+    /// unset, which surfaces here as an empty string and yields `None`. The
+    /// returned PROPVARIANT frees itself on drop; the alloc'd string is ours
+    /// to free with CoTaskMemFree.
+    unsafe fn window_prop_aumid(hwnd: HWND) -> Option<String> {
+        let store: IPropertyStore = SHGetPropertyStoreForWindow(hwnd).ok()?;
+        let value = store.GetValue(&PKEY_AppUserModel_ID).ok()?;
+        let id = PropVariantToStringAlloc(&value).ok()?;
+        let text = id.to_string().ok();
+        CoTaskMemFree(Some(id.0 as *const _));
+        text.filter(|t| !t.is_empty())
     }
 
     /// FileDescription from the exe's version resource ("Visual Studio Code"),
