@@ -267,10 +267,11 @@ mod win {
             return None;
         }
         let chars = std::slice::from_raw_parts(ptr as *const u16, len as usize);
-        let name = String::from_utf16_lossy(chars)
-            .trim_end_matches('\0')
-            .trim()
-            .to_string();
+        // Some resources (Spotify) report a len past the value's own NUL, so
+        // the slice runs into the next key's bytes. Stop at the first NUL
+        // rather than trusting len, then trim.
+        let name = String::from_utf16_lossy(chars);
+        let name = name.split('\0').next().unwrap_or("").trim().to_string();
         (!name.is_empty()).then_some(name)
     }
 
