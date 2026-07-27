@@ -17,6 +17,7 @@ const ICON: f32 = 64.0;
 const CELL: f32 = 84.0; // icon cell = selection square
 const PAD: f32 = 24.0; // panel padding around the row
 const LABEL_H: f32 = 20.0; // name strip under the icons, hugs the 14 px line
+const LABEL_EDGE_INSET: f32 = 14.0; // left/right label margin from the panel edge, ~one "W"
 
 /// Window list:
 const ROW_H: f32 = 44.0;
@@ -33,6 +34,14 @@ pub struct Layout {
     pub n: usize,
     pub scale: f32,
     pub show_name: bool,
+}
+
+/// How the selected icon's name is aligned within its label rect.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LabelAlign {
+    Center,
+    Left,
+    Right,
 }
 
 impl Layout {
@@ -65,15 +74,51 @@ impl Layout {
         [l + inset, t + inset, r - inset, b - inset]
     }
 
-    /// Name label rect, symmetric around cell `i`'s center so the text sits
-    /// exactly under the icon; edge overflow is clipped by the render target.
-    pub fn label(&self, i: usize) -> [f32; 4] {
+    /// Alignment for the selected icon's name. Every label is centered under
+    /// its icon by default; only the row's two end icons switch, and only
+    /// when a centered label of `text_w` px would actually clip against the
+    /// panel edge. The left icon then left-aligns (text grows rightward), the
+    /// right icon right-aligns (text grows leftward), so the long name stays
+    /// fully on-panel. With a single icon (both ends at once) the left rule
+    /// wins, keeping the readable start of the name visible.
+    pub fn label_align(&self, i: usize, text_w: f32) -> LabelAlign {
+        let [l, _, r, _] = self.cell(i);
+        let center = (l + r) / 2.0;
+        let pw = self.size().0 as f32;
+        let half = text_w / 2.0;
+        if i == 0 && half > center {
+            LabelAlign::Left
+        } else if i == self.n - 1 && half > pw - center {
+            LabelAlign::Right
+        } else {
+            LabelAlign::Center
+        }
+    }
+
+    /// Name label rect for the given alignment. Centered is symmetric around
+    /// cell `i`'s center. Left runs from a one-character inset at the panel's
+    /// left edge to its right edge, so the overflowing name starts near the
+    /// dialog's left side but not hard against it; right is the mirror. The
+    /// inset is one font em (~a "W" wide), matching what the user reads as a
+    /// comfortable margin. Overflow past the panel is clipped by the render
+    /// target.
+    pub fn label(&self, i: usize, align: LabelAlign) -> [f32; 4] {
         let s = self.scale;
-        let [l, t, ..] = self.cell(i);
-        let center = l + CELL / 2.0 * s;
-        let half = 1.5 * CELL * s;
-        let top = t + CELL * s;
-        [center - half, top, center + half, top + self.label_h() * s]
+        let [cl, _, cr, _] = self.cell(i);
+        let center = (cl + cr) / 2.0;
+        let pw = self.size().0 as f32;
+        let inset = LABEL_EDGE_INSET * s;
+        let top = (PAD + CELL) * s;
+        let bottom = top + self.label_h() * s;
+        let (left, right) = match align {
+            LabelAlign::Center => {
+                let half = 1.5 * CELL * s;
+                (center - half, center + half)
+            }
+            LabelAlign::Left => (inset, pw),
+            LabelAlign::Right => (0.0, pw - inset),
+        };
+        [left, top, right, bottom]
     }
 
     /// Icon index for a mouse x, clamped to the row (AAS behavior: anywhere
@@ -173,7 +218,7 @@ pub use win::{close, is_open, kb_select, selection, show, show_list};
 
 #[cfg(windows)]
 mod win {
-    use super::{Layout, ListLayout, Panel, RADIUS};
+    use super::{LabelAlign, Layout, ListLayout, Panel, RADIUS};
     use crate::config::{Config, DialogMonitor, Theme};
     use std::cell::RefCell;
     use std::sync::Once;
@@ -196,7 +241,8 @@ mod win {
         DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_GDI_CLASSIC,
         DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
+        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+        DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP,
     };
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
     use windows::Win32::Graphics::Gdi::{
@@ -314,6 +360,7 @@ mod win {
         dc: HDC,
         bmp: HBITMAP,
         brush: ID2D1SolidColorBrush,
+        dwrite: IDWriteFactory,
         text: IDWriteTextFormat,
         bitmaps: Vec<Option<ID2D1Bitmap>>,
     }
@@ -727,7 +774,7 @@ mod win {
                 })
             })
             .collect();
-        Ok(D2d { rt, dc, bmp, brush, text, bitmaps })
+        Ok(D2d { rt, dc, bmp, brush, dwrite, text, bitmaps })
     }
 
     fn rect(r: [f32; 4]) -> D2D_RECT_F {
@@ -790,18 +837,37 @@ mod win {
         }
         if l.show_name {
             if let Some(entry) = entries.get(sel) {
-                let _ = x.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                let align = l.label_align(sel, text_width(x, &entry.name));
+                let dwrite_align = match align {
+                    LabelAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+                    LabelAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+                    LabelAlign::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
+                };
+                let _ = x.text.SetTextAlignment(dwrite_align);
                 x.brush.SetColor(&pal.text);
                 x.rt.DrawText(
                     &entry.name,
                     &x.text,
-                    &rect(snap(l.label(sel))),
+                    &rect(snap(l.label(sel, align))),
                     &x.brush,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
                     DWRITE_MEASURING_MODE_GDI_CLASSIC,
                 );
             }
         }
+    }
+
+    /// Width in pixels the name occupies with the row's text format, so the
+    /// caller can tell whether a centered label would clip at the panel edge.
+    unsafe fn text_width(x: &D2d, name: &[u16]) -> f32 {
+        let Ok(layout) = x.dwrite.CreateTextLayout(name, &x.text, f32::MAX, f32::MAX) else {
+            return 0.0;
+        };
+        let mut m = DWRITE_TEXT_METRICS::default();
+        if layout.GetMetrics(&mut m).is_err() {
+            return 0.0;
+        }
+        m.width
     }
 
     unsafe fn draw_list(x: &D2d, l: &ListLayout, entries: &[Entry], sel: usize, pal: &Palette) {
@@ -931,16 +997,68 @@ mod tests {
 
     #[test]
     fn label_centered_under_its_cell() {
-        // Even at the edges the label stays symmetric around the icon; any
-        // overflow is clipped, never shifted toward the panel center.
+        // Even at the edges the centered label stays symmetric around the
+        // icon; any overflow is clipped, never shifted toward the panel center.
         for i in [0, 2, L.n - 1] {
-            let [ll, lt, lr, lb] = L.label(i);
+            let [ll, lt, lr, lb] = L.label(i, LabelAlign::Center);
             let [cl, _, cr, cb] = L.cell(i);
             assert_eq!((ll + lr) / 2.0, (cl + cr) / 2.0, "centered under cell {i}");
             assert_eq!(lt, cb, "label starts under the cell");
             assert_eq!(lb - lt, LABEL_H);
         }
-        assert!(L.label(0)[0] < 0.0, "edge label may overflow; clipping handles it");
+        assert!(
+            L.label(0, LabelAlign::Center)[0] < 0.0,
+            "edge label may overflow; clipping handles it"
+        );
+    }
+
+    #[test]
+    fn label_align_only_switches_at_the_ends_when_clipping() {
+        // A name that fits keeps every icon centered, edges included.
+        let narrow = 40.0;
+        for i in 0..L.n {
+            assert_eq!(L.label_align(i, narrow), LabelAlign::Center);
+        }
+        // A name wide enough to clip past the panel flips only the two ends.
+        let wide = 400.0;
+        assert_eq!(L.label_align(0, wide), LabelAlign::Left);
+        assert_eq!(L.label_align(L.n - 1, wide), LabelAlign::Right);
+        for i in 1..L.n - 1 {
+            assert_eq!(L.label_align(i, wide), LabelAlign::Center, "middle {i} stays centered");
+        }
+    }
+
+    #[test]
+    fn label_align_center_until_the_centered_label_would_clip() {
+        // Left icon: switches to Left only once half the text passes the
+        // icon's center, i.e. the centered label would run off the panel.
+        let [cl, _, cr, _] = L.cell(0);
+        let center = (cl + cr) / 2.0;
+        assert_eq!(L.label_align(0, 2.0 * center - 1.0), LabelAlign::Center);
+        assert_eq!(L.label_align(0, 2.0 * center + 1.0), LabelAlign::Left);
+    }
+
+    #[test]
+    fn label_align_single_icon_prefers_left() {
+        // One icon is both ends at once; the left rule wins so the readable
+        // start of the name stays visible.
+        let one = Layout { n: 1, ..L };
+        assert_eq!(one.label_align(0, 4000.0), LabelAlign::Left);
+    }
+
+    #[test]
+    fn label_left_and_right_stay_on_panel() {
+        let pw = L.size().0 as f32;
+        // Left and right edge labels span the panel less a one-char inset on
+        // the aligned side; the DirectWrite alignment then pins the text to
+        // that inset, so a long name starts (Left) or ends (Right) near the
+        // panel edge with a small margin.
+        let [ll, _, lr, _] = L.label(0, LabelAlign::Left);
+        assert_eq!(ll, LABEL_EDGE_INSET, "left label sits one char in from the edge");
+        assert_eq!(lr, pw);
+        let [rl, _, rr, _] = L.label(L.n - 1, LabelAlign::Right);
+        assert_eq!(rl, 0.0);
+        assert_eq!(rr, pw - LABEL_EDGE_INSET, "right label ends one char in from the edge");
     }
 
     #[test]
