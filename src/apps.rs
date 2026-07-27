@@ -64,6 +64,33 @@ pub fn downscale_premul_bgra(src: &[u8], src_px: u32, dst_px: u32) -> Vec<u8> {
     out
 }
 
+/// Force BGRA pixels into premultiplied alpha when the source is straight
+/// (unassociated) alpha. The shell's `GetImage` hands some icons back
+/// premultiplied and others straight — packaged-app assets (1Password, Teams)
+/// and a few Win32 apps (VS Code) come through straight — but the rest of the
+/// pipeline (the D2D bitmap's alpha mode and [`downscale_premul_bgra`]) assumes
+/// premultiplied. A straight-alpha edge pixel keeps its full-strength color
+/// (often near-white antialiasing) under a partial alpha, which then blends as
+/// a bright fringe. Valid premultiplied data can never have a color channel
+/// exceed its alpha, so a single pixel that does proves the whole image is
+/// straight and must be premultiplied; images already premultiplied are left
+/// untouched.
+pub fn premultiply_bgra(bits: &mut [u8]) {
+    let straight = bits
+        .chunks_exact(4)
+        .any(|p| p[0] > p[3] || p[1] > p[3] || p[2] > p[3]);
+    if !straight {
+        return;
+    }
+    for p in bits.chunks_exact_mut(4) {
+        let a = u32::from(p[3]);
+        for c in &mut p[..3] {
+            // Round-to-nearest premultiply: (channel * alpha) / 255.
+            *c = ((u32::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+}
+
 #[cfg(windows)]
 pub use win::*;
 
@@ -321,7 +348,14 @@ mod win {
         );
         let _ = DeleteDC(dc);
         let _ = DeleteObject(bitmap.into());
-        (lines != 0).then_some(bits)
+        if lines == 0 {
+            return None;
+        }
+        // Some icons arrive in straight alpha despite the premultiplied
+        // contract the rest of the pipeline relies on; correct them here so
+        // edges don't blend as a bright fringe.
+        super::premultiply_bgra(&mut bits);
+        Some(bits)
     }
 
     /// The foreground app's exe path and all its windows in z-order
@@ -593,6 +627,35 @@ mod tests {
         // Ratio 1 reproduces the input exactly.
         let ramp: Vec<u8> = (0..3 * 3 * 4).map(|i| i as u8).collect();
         assert_eq!(downscale_premul_bgra(&ramp, 3, 3), ramp);
+    }
+
+    #[test]
+    fn premultiply_corrects_straight_alpha() {
+        // A straight-alpha edge pixel: white antialiasing under 50% alpha.
+        // B,G,R (255) exceed alpha (128), which is impossible for premultiplied
+        // data, so the whole image is premultiplied down to 128.
+        let mut bits = vec![255, 255, 255, 128];
+        premultiply_bgra(&mut bits);
+        assert_eq!(bits, vec![128, 128, 128, 128]);
+    }
+
+    #[test]
+    fn premultiply_leaves_premultiplied_untouched() {
+        // Already premultiplied (every channel <= alpha): a no-op.
+        let orig = vec![10, 20, 30, 40, 0, 0, 0, 0, 200, 200, 200, 255];
+        let mut bits = orig.clone();
+        premultiply_bgra(&mut bits);
+        assert_eq!(bits, orig);
+    }
+
+    #[test]
+    fn premultiply_rounds_and_zeroes_transparent() {
+        // Fully transparent straight pixel drops its color; a partial pixel
+        // rounds to nearest. The first pixel (color > alpha) marks it straight.
+        let mut bits = vec![255, 255, 255, 0, 100, 200, 50, 128];
+        premultiply_bgra(&mut bits);
+        // (100*128+127)/255 = 50, (200*128+127)/255 = 100, (50*128+127)/255 = 25.
+        assert_eq!(bits, vec![0, 0, 0, 0, 50, 100, 25, 128]);
     }
 
     #[test]
