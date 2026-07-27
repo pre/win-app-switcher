@@ -152,6 +152,26 @@ binary against the release as described below.
   application-centric alt-tab switcher for Windows, written in C. Thanks to
   it for the inspiration behind this project.
 
+## Building from source
+
+### Prerequisites
+
+1. **rustup, xwin** (Windows SDK sysroot) and **cargo-xwin** (Cargo subcommand):
+   ```
+   brew install rustup xwin
+   rustup default stable
+   rustup target add x86_64-pc-windows-msvc
+   cargo install cargo-xwin
+   ```
+
+### Build
+
+```
+make build
+```
+
+Output: `dist/win-app-switcher.exe`
+
 ## Publishing a release
 
 ```

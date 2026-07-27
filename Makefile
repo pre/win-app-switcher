@@ -1,7 +1,7 @@
-# Toolchain lives outside the default shell PATH (brew rustup + cargo-installed cargo-xwin).
-# Full path to cargo because Apple's make 3.81 ignores exported PATH when exec'ing recipes.
-CARGO := /opt/homebrew/opt/rustup/bin/cargo
-export PATH := $(HOME)/.cargo/bin:/opt/homebrew/opt/rustup/bin:$(PATH)
+# Extend PATH so make 3.81 on macOS finds cargo even when invoked outside an
+# interactive shell. $(shell which cargo) resolves at parse time from this PATH.
+export PATH := $(HOME)/.cargo/bin:/opt/homebrew/opt/rustup/bin:/home/linuxbrew/.linuxbrew/opt/rustup/bin:$(PATH)
+CARGO := $(or $(shell PATH="$(HOME)/.cargo/bin:/opt/homebrew/opt/rustup/bin:/home/linuxbrew/.linuxbrew/opt/rustup/bin:$$PATH" which cargo),cargo)
 
 TARGET := x86_64-pc-windows-msvc
 
