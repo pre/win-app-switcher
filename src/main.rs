@@ -116,7 +116,7 @@ mod win {
         /// WIN+§: the foreground app's windows. A quick tap switches with no
         /// UI; the list dialog appears if WIN is held past `dialog_delay_ms`.
         Win {
-            exe: String,
+            key: crate::apps::AppKey,
             windows: Vec<HWND>,
             index: usize,
         },
@@ -463,18 +463,22 @@ mod win {
             }
             WinNext | WinPrev => {
                 if slot.is_none() {
-                    let (exe, windows) = crate::apps::foreground_app_windows(
+                    let (key, windows) = crate::apps::foreground_app_windows(
                         cfg.restore_minimized,
                         cfg.desktop_filter == DesktopFilter::All,
                     );
                     #[cfg(debug_assertions)]
                     println!("win session: {} candidates", windows.len());
-                    // The list dialog appears only if WIN is still held after
-                    // the delay — a quick tap switches with no UI.
-                    unsafe {
-                        SetTimer(Some(main_hwnd), TIMER_WINLIST, cfg.dialog_delay_ms, None);
+                    // No eligible foreground app (e.g. focus on the desktop):
+                    // nothing to cycle, don't start a session.
+                    if let Some(key) = key {
+                        // The list dialog appears only if WIN is still held
+                        // after the delay — a quick tap switches with no UI.
+                        unsafe {
+                            SetTimer(Some(main_hwnd), TIMER_WINLIST, cfg.dialog_delay_ms, None);
+                        }
+                        *slot = Some(Session::Win { key, windows, index: 0 });
                     }
-                    *slot = Some(Session::Win { exe, windows, index: 0 });
                 }
                 if let Some(Session::Win { windows, index, .. }) = slot {
                     *index =
@@ -545,7 +549,7 @@ mod win {
             // W in the window list: close only the selected window, keep the
             // app and the session going (macOS Cmd+W behavior).
             CloseWindow => {
-                if let Some(Session::Win { exe, windows, index }) = slot {
+                if let Some(Session::Win { key, windows, index }) = slot {
                     if windows.is_empty() {
                         return;
                     }
@@ -568,8 +572,8 @@ mod win {
                     } else {
                         *index = sel.min(windows.len() - 1);
                         if crate::ui::is_open() {
-                            let name = crate::apps::display_name(exe);
-                            let icon = crate::apps::icon_source(windows[0], exe);
+                            let name = crate::apps::app_name(key);
+                            let icon = crate::apps::icon_source(key);
                             let titles: Vec<String> =
                                 windows.iter().map(|&w| crate::apps::window_title(w)).collect();
                             crate::ui::show_list(main_hwnd, &name, &icon, &titles, *index, &cfg);
@@ -584,12 +588,12 @@ mod win {
     fn show_window_list(main_hwnd: HWND) {
         let cfg = CONFIG.get().cloned().unwrap_or_default();
         SESSION.with_borrow(|slot| {
-            if let Some(Session::Win { exe, windows, index }) = slot {
+            if let Some(Session::Win { key, windows, index }) = slot {
                 if windows.is_empty() {
                     return;
                 }
-                let name = crate::apps::display_name(exe);
-                let icon = crate::apps::icon_source(windows[0], exe);
+                let name = crate::apps::app_name(key);
+                let icon = crate::apps::icon_source(key);
                 let titles: Vec<String> =
                     windows.iter().map(|&w| crate::apps::window_title(w)).collect();
                 crate::ui::show_list(main_hwnd, &name, &icon, &titles, *index, &cfg);

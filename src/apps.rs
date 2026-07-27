@@ -19,6 +19,37 @@ pub fn group_by_key<T, K: PartialEq>(items: Vec<(T, K)>) -> Vec<(K, Vec<T>)> {
     groups
 }
 
+/// Identity of one app for grouping. A Chrome/Edge PWA tags each of its
+/// windows with a per-window AppUserModelID; keying on that AUMID (when
+/// present) splits the PWA into its own switcher entry instead of folding it
+/// into the browser's `chrome.exe` group. Ordinary windows carry no AUMID and
+/// key on the exe path, so a browser's own windows still share one group.
+#[derive(Clone)]
+pub struct AppKey {
+    /// The exe path, always present: the display-name and icon fallback, and
+    /// the grouping key when there is no AUMID.
+    pub exe: String,
+    /// The window's AUMID, set for PWA and packaged (UWP) windows.
+    pub aumid: Option<String>,
+}
+
+impl AppKey {
+    /// The grouping/identity string: the AUMID when the window carries one,
+    /// else the exe path.
+    pub fn id(&self) -> &str {
+        self.aumid.as_deref().unwrap_or(&self.exe)
+    }
+}
+
+/// Two windows group together iff they share an identity — same AUMID, or
+/// (both browser-plain) same exe. The exe field is carried for display only
+/// and deliberately excluded from equality.
+impl PartialEq for AppKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id()
+    }
+}
+
 /// Selection index moved one step forward or backward, wrapping at the ends.
 pub fn step_index(len: usize, index: usize, forward: bool) -> usize {
     if len == 0 {
@@ -96,7 +127,7 @@ pub use win::*;
 
 #[cfg(windows)]
 mod win {
-    use super::group_by_key;
+    use super::{group_by_key, AppKey};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -125,8 +156,8 @@ mod win {
         IPropertyStore, SHGetPropertyStoreForWindow,
     };
     use windows::Win32::UI::Shell::{
-        IShellItemImageFactory, IVirtualDesktopManager, SHCreateItemFromParsingName,
-        VirtualDesktopManager, SIIGBF, SIIGBF_ICONONLY, SIIGBF_SCALEUP,
+        IShellItem, IShellItemImageFactory, IVirtualDesktopManager, SHCreateItemFromParsingName,
+        VirtualDesktopManager, SIGDN_NORMALDISPLAY, SIIGBF, SIIGBF_ICONONLY, SIIGBF_SCALEUP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetForegroundWindow, GetParent,
@@ -150,17 +181,18 @@ mod win {
     ];
 
     /// Eligible top-level windows in z-order (topmost first), each with its
-    /// process executable path — the grouping key. With `all_desktops`,
-    /// windows on other virtual desktops are included too.
-    pub fn eligible_windows(all_desktops: bool) -> Vec<(HWND, String)> {
+    /// grouping key ([`AppKey`]: AUMID when the window tags one, else the exe
+    /// path). With `all_desktops`, windows on other virtual desktops are
+    /// included too.
+    pub fn eligible_windows(all_desktops: bool) -> Vec<(HWND, AppKey)> {
         struct Ctx {
-            list: Vec<(HWND, String)>,
+            list: Vec<(HWND, AppKey)>,
             vdm: Option<IVirtualDesktopManager>,
         }
         unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
             let ctx = &mut *(lparam.0 as *mut Ctx);
-            if let Some(exe) = eligible_exe(hwnd, ctx.vdm.as_ref()) {
-                ctx.list.push((hwnd, exe));
+            if let Some(key) = eligible_key(hwnd, ctx.vdm.as_ref()) {
+                ctx.list.push((hwnd, key));
             }
             true.into()
         }
@@ -190,12 +222,22 @@ mod win {
     pub fn app_groups(all_desktops: bool) -> Vec<AppGroup> {
         group_by_key(eligible_windows(all_desktops))
             .into_iter()
-            .map(|(exe, windows)| AppGroup {
-                name: display_name(&exe),
-                icon: icon_source(windows[0], &exe),
+            .map(|(key, windows)| AppGroup {
+                name: app_name(&key),
+                icon: icon_source(&key),
                 windows,
             })
             .collect()
+    }
+
+    /// Display name for a group: a PWA/UWP app resolves its AUMID to the real
+    /// app name ("ChatGPT"), so it doesn't read as "Google Chrome". Plain
+    /// windows fall back to the exe's FileDescription.
+    pub fn app_name(key: &AppKey) -> String {
+        key.aumid
+            .as_deref()
+            .and_then(|id| unsafe { aumid_display_name(id) })
+            .unwrap_or_else(|| display_name(&key.exe))
     }
 
     /// Shell parsing name whose icon represents the app: an app with an
@@ -204,10 +246,35 @@ mod win {
     /// carries the app's real icon. The exe alone yields a blank icon for UWP
     /// and the generic browser icon for a PWA. Everything else resolves
     /// through the exe path itself.
-    pub fn icon_source(hwnd: HWND, exe: &str) -> String {
-        unsafe { window_aumid(hwnd) }
+    pub fn icon_source(key: &AppKey) -> String {
+        key.aumid
+            .as_deref()
             .map(|id| format!("shell:AppsFolder\\{id}"))
-            .unwrap_or_else(|| exe.to_string())
+            .unwrap_or_else(|| key.exe.clone())
+    }
+
+    /// The `shell:AppsFolder\{aumid}` shell item, or `None` when the AUMID
+    /// names no registered app. Only installed PWAs and UWP apps have an
+    /// AppsFolder entry; a plain browser window's own AUMID resolves to
+    /// nothing, so this is also how we tell a real app AUMID from Chrome's
+    /// per-window browser AUMID.
+    unsafe fn aumid_shell_item(aumid: &str) -> Option<IShellItem> {
+        let parsing: Vec<u16> = format!("shell:AppsFolder\\{aumid}")
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        SHCreateItemFromParsingName(PCWSTR(parsing.as_ptr()), None::<&IBindCtx>).ok()
+    }
+
+    /// The shell display name of `shell:AppsFolder\{aumid}` — the app's real
+    /// name, e.g. "ChatGPT" for a Chrome PWA. `None` if the AUMID doesn't
+    /// resolve to a shell item.
+    unsafe fn aumid_display_name(aumid: &str) -> Option<String> {
+        let item = aumid_shell_item(aumid)?;
+        let name = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+        let text = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        text.filter(|t| !t.is_empty())
     }
 
     /// AppUserModelID identifying the app behind a window, or `None` for a
@@ -215,8 +282,15 @@ mod win {
     /// identity (UWP), then the window's own property store — Chrome and Edge
     /// stamp each PWA window with `PKEY_AppUserModel_ID`, which is how the
     /// taskbar pins and icons a PWA apart from the browser.
+    ///
+    /// Chrome and Edge also stamp their *ordinary* browser windows with a
+    /// per-profile AUMID that names no AppsFolder app; accepting it would key
+    /// the browser group on a `shell:AppsFolder` path that resolves to a blank
+    /// icon. So an AUMID counts only when it resolves to a real AppsFolder app;
+    /// otherwise the window falls back to grouping and iconing by its exe.
     unsafe fn window_aumid(hwnd: HWND) -> Option<String> {
-        process_aumid(hwnd).or_else(|| window_prop_aumid(hwnd))
+        let aumid = process_aumid(hwnd).or_else(|| window_prop_aumid(hwnd))?;
+        aumid_shell_item(&aumid).map(|_| aumid)
     }
 
     /// AUMID from the owning process's packaged identity; `None` for
@@ -391,31 +465,35 @@ mod win {
         Some(bits)
     }
 
-    /// The foreground app's exe path and all its windows in z-order
-    /// (foreground first). With `include_minimized` off, minimized windows
-    /// are skipped — without restore-on-activate a minimized window cannot
-    /// visibly take focus.
-    pub fn foreground_app_windows(include_minimized: bool, all_desktops: bool) -> (String, Vec<HWND>) {
+    /// The foreground app's grouping key and all its windows in z-order
+    /// (foreground first). Keyed by [`AppKey`] so a focused PWA scopes to its
+    /// own windows, not to every Chrome window. With `include_minimized` off,
+    /// minimized windows are skipped — without restore-on-activate a minimized
+    /// window cannot visibly take focus.
+    pub fn foreground_app_windows(
+        include_minimized: bool,
+        all_desktops: bool,
+    ) -> (Option<AppKey>, Vec<HWND>) {
         unsafe {
             // The foreground window itself may be ineligible (e.g. a child
             // dialog); walk up until an eligible window names the app.
             // The foreground window is on the current desktop by definition.
             let mut fg = GetForegroundWindow();
-            let exe = loop {
+            let key = loop {
                 if fg.0.is_null() {
-                    return (String::new(), Vec::new());
+                    return (None, Vec::new());
                 }
-                if let Some(exe) = eligible_exe(fg, None) {
-                    break exe;
+                if let Some(key) = eligible_key(fg, None) {
+                    break key;
                 }
                 fg = GetParent(fg).unwrap_or_default();
             };
             let windows = eligible_windows(all_desktops)
                 .into_iter()
-                .filter(|(w, e)| *e == exe && (include_minimized || !IsIconic(*w).as_bool()))
+                .filter(|(w, k)| *k == key && (include_minimized || !IsIconic(*w).as_bool()))
                 .map(|(w, _)| w)
                 .collect();
-            (exe, windows)
+            (Some(key), windows)
         }
     }
 
@@ -523,11 +601,12 @@ mod win {
         AttachThreadInput(cur, tid, true).as_bool().then_some(tid)
     }
 
-    /// Port of AAS `IsEligibleWindow`: `Some(exe path)` if the window belongs
-    /// in a switcher, `None` otherwise. A desktop manager (`vdm`) keeps
-    /// windows that are cloaked only because they live on another virtual
-    /// desktop (desktop_filter = "all").
-    unsafe fn eligible_exe(hwnd: HWND, vdm: Option<&IVirtualDesktopManager>) -> Option<String> {
+    /// Port of AAS `IsEligibleWindow`: `Some(AppKey)` if the window belongs in
+    /// a switcher, `None` otherwise. The key carries the exe path plus the
+    /// window's AUMID (when it tags one), so PWAs group apart from the
+    /// browser. A desktop manager (`vdm`) keeps windows that are cloaked only
+    /// because they live on another virtual desktop (desktop_filter = "all").
+    unsafe fn eligible_key(hwnd: HWND, vdm: Option<&IVirtualDesktopManager>) -> Option<AppKey> {
         if hwnd == GetShellWindow() {
             return None; // the desktop
         }
@@ -571,7 +650,8 @@ mod win {
                 return None;
             }
         }
-        exe_path(window_pid(hwnd, &class))
+        let exe = exe_path(window_pid(hwnd, &class))?;
+        Some(AppKey { exe, aumid: window_aumid(hwnd) })
     }
 
     unsafe fn class_name(hwnd: HWND) -> String {
@@ -640,6 +720,52 @@ mod tests {
     #[test]
     fn grouping_empty_input() {
         assert!(group_by_key::<i32, &str>(vec![]).is_empty());
+    }
+
+    fn key(exe: &str, aumid: Option<&str>) -> AppKey {
+        AppKey { exe: exe.to_string(), aumid: aumid.map(str::to_string) }
+    }
+
+    #[test]
+    fn pwas_split_from_browser_by_aumid() {
+        // Two chrome.exe windows tagged with different PWA AUMIDs, plus a
+        // plain browser window (no AUMID). Each PWA is its own group; the
+        // plain window keys on the exe.
+        let chatgpt = key("chrome.exe", Some("Chrome._crx_chatgpt"));
+        let outlook = key("chrome.exe", Some("Chrome._crx_outlook"));
+        let browser = key("chrome.exe", None);
+        let groups = group_by_key(vec![
+            (1, chatgpt.clone()),
+            (2, outlook.clone()),
+            (3, browser.clone()),
+        ]);
+        let ids: Vec<&str> = groups.iter().map(|(k, _)| k.id()).collect();
+        assert_eq!(ids, vec!["Chrome._crx_chatgpt", "Chrome._crx_outlook", "chrome.exe"]);
+        assert!(groups.iter().all(|(_, members)| members.len() == 1));
+    }
+
+    #[test]
+    fn same_aumid_windows_merge_across_exe() {
+        // Same PWA identity groups its windows together; the exe field is
+        // display-only and excluded from equality.
+        let a = key("chrome.exe", Some("Chrome._crx_chatgpt"));
+        let b = key("chrome.exe", Some("Chrome._crx_chatgpt"));
+        let groups = group_by_key(vec![(1, a), (2, b)]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1, vec![1, 2]);
+    }
+
+    #[test]
+    fn plain_windows_group_by_exe() {
+        // No AUMID: ordinary browsing stays one group per exe.
+        let groups = group_by_key(vec![
+            (1, key("chrome.exe", None)),
+            (2, key("code.exe", None)),
+            (3, key("chrome.exe", None)),
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].1, vec![1, 3]);
+        assert_eq!(groups[1].1, vec![2]);
     }
 
     #[test]
