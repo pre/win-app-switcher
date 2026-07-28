@@ -90,8 +90,12 @@ mod win {
     const TIMER_UPDATE: usize = 2;
     /// Tray-icon add retry (the shell may not be ready at logon).
     const TIMER_TRAY: usize = 3;
+    /// Timer that opens the WIN+TAB icon row after `dialog_delay_ms`.
+    const TIMER_APPROW: usize = 4;
     /// Posted by the update-check thread when a newer release exists.
     const WM_UPDATE: u32 = WM_APP + 3;
+    /// Posted to itself at startup: prime the caches off the keystroke path.
+    const WM_WARM: u32 = WM_APP + 4;
     /// The tag CI stamped into this build; "" on dev builds (no update check).
     const RELEASE_TAG: &str = env!("RELEASE_TAG");
     const RELEASES_LATEST_URL: PCWSTR = w!("https://github.com/pre/win-app-switcher/releases/latest");
@@ -107,8 +111,9 @@ mod win {
     /// A switcher session: from the first Next/Prev event to Commit/Cancel.
     /// Candidates are captured once at session start, in z-order.
     enum Session {
-        /// WIN+TAB: one group per app, shown in the switcher dialog. `kb` is
-        /// the keyboard selection; the mouse selection lives in [`crate::ui`].
+        /// WIN+TAB: one group per app. A quick tap switches with no UI; the
+        /// icon row appears if WIN is held past `dialog_delay_ms`. `kb` is the
+        /// keyboard selection; the mouse selection lives in [`crate::ui`].
         App {
             groups: Vec<crate::apps::AppGroup>,
             kb: usize,
@@ -246,6 +251,12 @@ mod win {
 
             crate::hook::start(hwnd);
 
+            // Resolve names, icons and the Direct2D renderer before the first
+            // switcher needs them. Posted rather than called: the message loop
+            // below runs it, so the hook is already live and a keypress during
+            // warm-up queues behind it instead of being dropped.
+            let _ = PostMessageW(Some(hwnd), WM_WARM, WPARAM(0), LPARAM(0));
+
             if RELEASE_TAG.is_empty() {
                 #[cfg(debug_assertions)]
                 println!("update check skipped: dev build (no RELEASE_TAG)");
@@ -379,6 +390,15 @@ mod win {
                 show_window_list(hwnd);
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == TIMER_APPROW => {
+                let _ = KillTimer(Some(hwnd), TIMER_APPROW);
+                show_app_row(hwnd);
+                LRESULT(0)
+            }
+            m if m == WM_WARM => {
+                warm();
+                LRESULT(0)
+            }
             WM_TIMER if wparam.0 == TIMER_TRAY => {
                 if add_tray_icon(hwnd) {
                     let _ = KillTimer(Some(hwnd), TIMER_TRAY);
@@ -448,14 +468,20 @@ mod win {
                         }
                         #[cfg(debug_assertions)]
                         println!("app session: {} apps", groups.len());
+                        // The icon row appears only if WIN is still held after
+                        // the delay — a quick tap switches with no UI, so the
+                        // dialog never flashes up and straight back down.
+                        unsafe {
+                            SetTimer(Some(main_hwnd), TIMER_APPROW, cfg.dialog_delay_ms, None);
+                        }
                         // First press lands on the second app: releasing
                         // instantly switches to the previous app (macOS).
                         let kb = crate::apps::step_index(groups.len(), 0, forward);
-                        crate::ui::show(main_hwnd, &groups, kb, &cfg);
                         *slot = Some(Session::App { groups, kb });
                     }
                     Some(Session::App { groups, kb }) => {
                         *kb = crate::apps::step_index(groups.len(), *kb, forward);
+                        // The row follows once open; a no-op before that.
                         crate::ui::kb_select(*kb);
                     }
                     Some(Session::Win { .. }) => unreachable!("discarded above"),
@@ -490,13 +516,24 @@ mod win {
             Commit => {
                 unsafe {
                     let _ = KillTimer(Some(main_hwnd), TIMER_WINLIST);
+                    let _ = KillTimer(Some(main_hwnd), TIMER_APPROW);
                 }
                 match slot.take() {
-                    Some(Session::App { groups, .. }) => {
-                        let sel = crate::ui::selection();
+                    Some(Session::App { groups, kb }) => {
+                        // The mouse may have picked an icon in the row.
+                        let sel = if crate::ui::is_open() {
+                            crate::ui::selection()
+                        } else {
+                            kb
+                        };
                         if let Some(group) = groups.get(sel) {
                             #[cfg(debug_assertions)]
-                            println!("activate app {}/{} ({})", sel + 1, groups.len(), group.name);
+                            println!(
+                                "activate app {}/{} ({})",
+                                sel + 1,
+                                groups.len(),
+                                crate::apps::app_name(&group.key)
+                            );
                             // Activate first: the dialog holds the foreground,
                             // so SetForegroundWindow here is trivially allowed.
                             crate::apps::activate(group.windows[0], cfg.restore_minimized);
@@ -523,6 +560,7 @@ mod win {
             Cancel => {
                 unsafe {
                     let _ = KillTimer(Some(main_hwnd), TIMER_WINLIST);
+                    let _ = KillTimer(Some(main_hwnd), TIMER_APPROW);
                 }
                 slot.take();
                 crate::ui::close();
@@ -531,18 +569,25 @@ mod win {
             // from the row, keep the session going (macOS Cmd+Q behavior).
             CloseApp => {
                 if let Some(Session::App { groups, kb }) = slot {
-                    let sel = crate::ui::selection().min(groups.len() - 1);
+                    let open = crate::ui::is_open();
+                    let sel = if open { crate::ui::selection() } else { *kb }
+                        .min(groups.len() - 1);
                     for hwnd in groups.remove(sel).windows {
                         unsafe {
                             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                         }
                     }
                     if groups.is_empty() {
+                        unsafe {
+                            let _ = KillTimer(Some(main_hwnd), TIMER_APPROW);
+                        }
                         *slot = None;
                         crate::ui::close();
                     } else {
                         *kb = sel.min(groups.len() - 1);
-                        crate::ui::show(main_hwnd, groups, *kb, &cfg);
+                        if open {
+                            crate::ui::show(main_hwnd, groups, *kb, &cfg);
+                        }
                     }
                 }
             }
@@ -580,6 +625,34 @@ mod win {
                         }
                     }
                 }
+            }
+        });
+    }
+
+    /// Prime what the first switcher would otherwise resolve while the user
+    /// waits: the Direct2D renderer, and every running app's name and icon.
+    /// All of it is cached for the process lifetime, so this is paid once.
+    fn warm() {
+        let cfg = CONFIG.get().cloned().unwrap_or_default();
+        crate::ui::warm(&cfg);
+        let px = crate::ui::row_icon_px(&cfg);
+        let groups = crate::apps::app_groups(cfg.desktop_filter == DesktopFilter::All);
+        #[cfg(debug_assertions)]
+        println!("warm-up: {} apps", groups.len());
+        for group in &groups {
+            crate::apps::warm(&group.key, px);
+        }
+    }
+
+    /// `dialog_delay_ms` elapsed with WIN still held: open the icon row.
+    fn show_app_row(main_hwnd: HWND) {
+        let cfg = CONFIG.get().cloned().unwrap_or_default();
+        SESSION.with_borrow(|slot| {
+            if let Some(Session::App { groups, kb }) = slot {
+                if groups.is_empty() {
+                    return;
+                }
+                crate::ui::show(main_hwnd, groups, *kb, &cfg);
             }
         });
     }

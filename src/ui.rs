@@ -214,7 +214,7 @@ impl Panel {
 }
 
 #[cfg(windows)]
-pub use win::{close, is_open, kb_select, selection, show, show_list};
+pub use win::{close, is_open, kb_select, row_icon_px, selection, show, show_list, warm};
 
 #[cfg(windows)]
 mod win {
@@ -350,22 +350,34 @@ mod win {
         hover: usize,
         mouse_last: bool,
         last_pt: (i32, i32),
-        d2d: Option<D2d>, // dropped on device loss or refresh, rebuilt on render
+        surface: Option<Surface>, // dropped on device loss or resize, rebuilt on render
     }
 
-    /// Direct2D drawing into a premultiplied DIB that UpdateLayeredWindow
-    /// pushes to the screen — real alpha at the rounded corners.
-    struct D2d {
+    /// The device-independent half of the renderer: COM factories, the render
+    /// target and the text format. Creating these costs several milliseconds
+    /// (font enumeration above all), so they outlive the dialog and are built
+    /// once — during startup warm-up — instead of on every WIN+TAB.
+    struct Gfx {
         rt: ID2D1DCRenderTarget,
-        dc: HDC,
-        bmp: HBITMAP,
         brush: ID2D1SolidColorBrush,
         dwrite: IDWriteFactory,
         text: IDWriteTextFormat,
+        /// Scale `text` was created for; a different one needs a new format.
+        text_scale: f32,
+        /// Kept alive because `rt` is created from it.
+        _factory: ID2D1Factory,
+    }
+
+    /// The per-dialog half: a premultiplied DIB sized to the panel that
+    /// UpdateLayeredWindow pushes to the screen — real alpha at the rounded
+    /// corners — plus this dialog's icon bitmaps.
+    struct Surface {
+        dc: HDC,
+        bmp: HBITMAP,
         bitmaps: Vec<Option<ID2D1Bitmap>>,
     }
 
-    impl Drop for D2d {
+    impl Drop for Surface {
         fn drop(&mut self) {
             unsafe {
                 let _ = DeleteDC(self.dc);
@@ -374,9 +386,59 @@ mod win {
         }
     }
 
+    /// Both halves for one draw call.
+    struct Frame<'a> {
+        g: &'a Gfx,
+        s: &'a Surface,
+    }
+
     thread_local! {
         // Touched only by the main thread (dialog wndproc + session logic).
         static DLG: RefCell<Option<Dlg>> = const { RefCell::new(None) };
+        static GFX: RefCell<Option<Gfx>> = const { RefCell::new(None) };
+    }
+
+    /// Build the renderer ahead of the first switcher, off the keystroke path.
+    /// Safe to call more than once; a failure just leaves the work to the
+    /// first render.
+    pub fn warm(cfg: &Config) {
+        gfx(cfg.scale * dpi_scale(cfg), |_| false);
+    }
+
+    /// Size the icon row draws its icons at, so callers can extract them at
+    /// that size ahead of time.
+    pub fn row_icon_px(cfg: &Config) -> u32 {
+        (super::ICON * cfg.scale * dpi_scale(cfg)) as u32
+    }
+
+    fn dpi_scale(cfg: &Config) -> f32 {
+        monitor_work_rect(cfg.dialog_monitor).1
+    }
+
+    /// Run `f` with the shared renderer, creating it (or its text format, when
+    /// `scale` changed) as needed. `f` is skipped if creation fails, and
+    /// returns true to discard the renderer — the device was lost, so the
+    /// render target and everything created from it must be rebuilt. Every
+    /// draw sets its own brush colors, so the palette is not part of this.
+    fn gfx(scale: f32, f: impl FnOnce(&Gfx) -> bool) {
+        GFX.with_borrow_mut(|slot| {
+            if slot.is_none() {
+                *slot = unsafe { gfx_init(scale) }.ok();
+            }
+            let Some(g) = slot.as_mut() else { return };
+            if g.text_scale != scale {
+                match unsafe { text_format(&g.dwrite, scale) } {
+                    Ok(text) => {
+                        g.text = text;
+                        g.text_scale = scale;
+                    }
+                    Err(_) => return,
+                }
+            }
+            if f(g) {
+                *slot = None;
+            }
+        });
     }
 
     /// App switcher: one icon per app group. Icons are extracted at the size
@@ -388,9 +450,9 @@ mod win {
         let entries = groups
             .iter()
             .map(|g| Entry {
-                name: g.name.encode_utf16().collect(),
+                name: crate::apps::app_name(&g.key).encode_utf16().collect(),
                 title: Vec::new(),
-                icon: crate::apps::icon_bgra(&g.icon, px),
+                icon: crate::apps::icon_bgra(&crate::apps::icon_source(&g.key), px),
             })
             .collect();
         let panel = Panel::Row(Layout {
@@ -454,7 +516,7 @@ mod win {
                 d.kb = kb;
                 d.hover = kb;
                 d.mouse_last = false;
-                d.d2d = None; // sizes changed: rebuild the surface on next render
+                d.surface = None; // sizes changed: rebuild the surface on next render
                 unsafe {
                     let _ = SetWindowPos(d.hwnd, None, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
                 }
@@ -495,7 +557,7 @@ mod win {
                     hover: kb,
                     mouse_last: false,
                     last_pt: (pt.x - x, pt.y - y),
-                    d2d: None,
+                    surface: None,
                 });
                 Some(hwnd)
             }
@@ -555,17 +617,27 @@ mod win {
     fn render() {
         DLG.with_borrow_mut(|slot| {
             let Some(d) = slot.as_mut() else { return };
-            unsafe {
-                if d.d2d.is_none() {
-                    d.d2d = d2d_init(d).ok();
+            gfx(d.panel.scale(), |g| unsafe {
+                if d.surface.is_none() {
+                    d.surface = surface_init(g, d).ok();
                 }
                 let sel = if d.mouse_last { d.hover } else { d.kb };
-                let Some(x) = &d.d2d else { return };
-                if draw(x, &d.panel, &d.entries, sel, d.pal).is_err() {
-                    d.d2d = None; // device lost: rebuild on the next render
-                    return;
-                }
+                let Some(s) = &d.surface else { return false };
                 let (w, h) = d.panel.size();
+                // The render target binds to whichever surface draws next: one
+                // target is shared, the DIB is per dialog size.
+                if g.rt
+                    .BindDC(s.dc, &RECT { left: 0, top: 0, right: w, bottom: h })
+                    .is_err()
+                {
+                    d.surface = None;
+                    return true;
+                }
+                if draw(&Frame { g, s }, &d.panel, &d.entries, sel, d.pal).is_err() {
+                    // Device lost: both halves are rebuilt on the next render.
+                    d.surface = None;
+                    return true;
+                }
                 let blend = BLENDFUNCTION {
                     BlendOp: AC_SRC_OVER as u8,
                     BlendFlags: 0,
@@ -577,13 +649,14 @@ mod win {
                     None,
                     None,
                     Some(&SIZE { cx: w, cy: h }),
-                    Some(x.dc),
+                    Some(s.dc),
                     Some(&POINT { x: 0, y: 0 }),
                     COLORREF(0),
                     Some(&blend),
                     ULW_ALPHA,
                 );
-            }
+                false
+            });
         });
     }
 
@@ -691,7 +764,9 @@ mod win {
         }
     }
 
-    unsafe fn d2d_init(d: &Dlg) -> windows::core::Result<D2d> {
+    /// The COM factories, render target and text format, built once and kept
+    /// for the process lifetime.
+    unsafe fn gfx_init(scale: f32) -> windows::core::Result<Gfx> {
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
         let rt = factory.CreateDCRenderTarget(&D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
@@ -706,21 +781,33 @@ mod win {
         })?;
         // ClearType needs an opaque backdrop; grayscale AA works on alpha.
         let _ = rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        let brush = rt.CreateSolidColorBrush(&d.pal.text, None)?;
+        let brush = rt.CreateSolidColorBrush(&DARK.text, None)?;
         let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+        let text = text_format(&dwrite, scale)?;
+        Ok(Gfx { rt, brush, dwrite, text, text_scale: scale, _factory: factory })
+    }
+
+    unsafe fn text_format(
+        dwrite: &IDWriteFactory,
+        scale: f32,
+    ) -> windows::core::Result<IDWriteTextFormat> {
         let text = dwrite.CreateTextFormat(
             w!("Segoe UI"),
             None::<&IDWriteFontCollection>,
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            14.0 * d.panel.scale(),
+            14.0 * scale,
             w!("en-us"),
         )?;
         text.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
         text.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        Ok(text)
+    }
 
-        // The layered-window surface: a premultiplied top-down DIB.
+    /// The layered-window surface for one dialog: a premultiplied top-down DIB
+    /// sized to the panel, plus this dialog's icon bitmaps.
+    unsafe fn surface_init(g: &Gfx, d: &Dlg) -> windows::core::Result<Surface> {
         let (w, h) = d.panel.size();
         let dc = CreateCompatibleDC(None);
         let info = BITMAPINFO {
@@ -744,7 +831,7 @@ mod win {
             }
         };
         SelectObject(dc, bmp.into());
-        if let Err(e) = rt.BindDC(dc, &RECT { left: 0, top: 0, right: w, bottom: h }) {
+        if let Err(e) = g.rt.BindDC(dc, &RECT { left: 0, top: 0, right: w, bottom: h }) {
             let _ = DeleteDC(dc);
             let _ = DeleteObject(bmp.into());
             return Err(e);
@@ -764,7 +851,7 @@ mod win {
             .iter()
             .map(|e| {
                 e.icon.as_ref().and_then(|bgra| {
-                    rt.CreateBitmap(
+                    g.rt.CreateBitmap(
                         D2D_SIZE_U { width: px, height: px },
                         Some(bgra.as_ptr() as *const _),
                         px * 4,
@@ -774,7 +861,7 @@ mod win {
                 })
             })
             .collect();
-        Ok(D2d { rt, dc, bmp, brush, dwrite, text, bitmaps })
+        Ok(Surface { dc, bmp, bitmaps })
     }
 
     fn rect(r: [f32; 4]) -> D2D_RECT_F {
@@ -793,7 +880,7 @@ mod win {
     }
 
     unsafe fn draw(
-        x: &D2d,
+        x: &Frame,
         panel: &Panel,
         entries: &[Entry],
         sel: usize,
@@ -801,23 +888,23 @@ mod win {
     ) -> windows::core::Result<()> {
         let s = panel.scale();
         let (w, h) = panel.size();
-        x.rt.BeginDraw();
-        x.rt.Clear(Some(&CLEAR));
+        x.g.rt.BeginDraw();
+        x.g.rt.Clear(Some(&CLEAR));
         // The panel itself: rounded corners with real alpha outside, and a
         // thin darkened outline like the standard alt-tab dialog.
-        x.brush.SetColor(&pal.bg);
-        x.rt.FillRoundedRectangle(
+        x.g.brush.SetColor(&pal.bg);
+        x.g.rt.FillRoundedRectangle(
             &rounded([0.0, 0.0, w as f32, h as f32], RADIUS * s),
-            &x.brush,
+            &x.g.brush,
         );
         let bw = s.max(1.0); // 1 px outline, scaled
-        x.brush.SetColor(&pal.border);
-        x.rt.DrawRoundedRectangle(
+        x.g.brush.SetColor(&pal.border);
+        x.g.rt.DrawRoundedRectangle(
             &rounded(
                 [bw / 2.0, bw / 2.0, w as f32 - bw / 2.0, h as f32 - bw / 2.0],
                 RADIUS * s - bw / 2.0,
             ),
-            &x.brush,
+            &x.g.brush,
             bw,
             None,
         );
@@ -825,14 +912,14 @@ mod win {
             Panel::Row(l) => draw_row(x, l, entries, sel, pal),
             Panel::List(l) => draw_list(x, l, entries, sel, pal),
         }
-        x.rt.EndDraw(None, None)
+        x.g.rt.EndDraw(None, None)
     }
 
-    unsafe fn draw_row(x: &D2d, l: &Layout, entries: &[Entry], sel: usize, pal: &Palette) {
+    unsafe fn draw_row(x: &Frame, l: &Layout, entries: &[Entry], sel: usize, pal: &Palette) {
         let radius = 10.0 * l.scale;
-        x.brush.SetColor(&pal.hilite);
-        x.rt.FillRoundedRectangle(&rounded(snap(l.cell(sel)), radius), &x.brush);
-        for (i, bitmap) in x.bitmaps.iter().enumerate() {
+        x.g.brush.SetColor(&pal.hilite);
+        x.g.rt.FillRoundedRectangle(&rounded(snap(l.cell(sel)), radius), &x.g.brush);
+        for (i, bitmap) in x.s.bitmaps.iter().enumerate() {
             draw_icon(x, bitmap, l.icon(i), radius, pal);
         }
         if l.show_name {
@@ -843,13 +930,13 @@ mod win {
                     LabelAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
                     LabelAlign::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
                 };
-                let _ = x.text.SetTextAlignment(dwrite_align);
-                x.brush.SetColor(&pal.text);
-                x.rt.DrawText(
+                let _ = x.g.text.SetTextAlignment(dwrite_align);
+                x.g.brush.SetColor(&pal.text);
+                x.g.rt.DrawText(
                     &entry.name,
-                    &x.text,
+                    &x.g.text,
                     &rect(snap(l.label(sel, align))),
-                    &x.brush,
+                    &x.g.brush,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
                     DWRITE_MEASURING_MODE_GDI_CLASSIC,
                 );
@@ -859,8 +946,8 @@ mod win {
 
     /// Width in pixels the name occupies with the row's text format, so the
     /// caller can tell whether a centered label would clip at the panel edge.
-    unsafe fn text_width(x: &D2d, name: &[u16]) -> f32 {
-        let Ok(layout) = x.dwrite.CreateTextLayout(name, &x.text, f32::MAX, f32::MAX) else {
+    unsafe fn text_width(x: &Frame, name: &[u16]) -> f32 {
+        let Ok(layout) = x.g.dwrite.CreateTextLayout(name, &x.g.text, f32::MAX, f32::MAX) else {
             return 0.0;
         };
         let mut m = DWRITE_TEXT_METRICS::default();
@@ -870,28 +957,28 @@ mod win {
         m.width
     }
 
-    unsafe fn draw_list(x: &D2d, l: &ListLayout, entries: &[Entry], sel: usize, pal: &Palette) {
+    unsafe fn draw_list(x: &Frame, l: &ListLayout, entries: &[Entry], sel: usize, pal: &Palette) {
         let radius = 8.0 * l.scale;
-        x.brush.SetColor(&pal.hilite);
-        x.rt.FillRoundedRectangle(&rounded(snap(l.row(sel)), radius), &x.brush);
-        let _ = x.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        x.g.brush.SetColor(&pal.hilite);
+        x.g.rt.FillRoundedRectangle(&rounded(snap(l.row(sel)), radius), &x.g.brush);
+        let _ = x.g.text.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         for (i, entry) in entries.iter().enumerate() {
-            draw_icon(x, &x.bitmaps[i], l.icon(i), 6.0 * l.scale, pal);
-            x.brush.SetColor(&pal.text);
-            x.rt.DrawText(
+            draw_icon(x, &x.s.bitmaps[i], l.icon(i), 6.0 * l.scale, pal);
+            x.g.brush.SetColor(&pal.text);
+            x.g.rt.DrawText(
                 &entry.name,
-                &x.text,
+                &x.g.text,
                 &rect(snap(l.name(i))),
-                &x.brush,
+                &x.g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_GDI_CLASSIC,
             );
-            x.brush.SetColor(&pal.dim);
-            x.rt.DrawText(
+            x.g.brush.SetColor(&pal.dim);
+            x.g.rt.DrawText(
                 &entry.title,
-                &x.text,
+                &x.g.text,
                 &rect(snap(l.title(i))),
-                &x.brush,
+                &x.g.brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_GDI_CLASSIC,
             );
@@ -899,7 +986,7 @@ mod win {
     }
 
     unsafe fn draw_icon(
-        x: &D2d,
+        x: &Frame,
         bitmap: &Option<ID2D1Bitmap>,
         r: [f32; 4],
         radius: f32,
@@ -907,7 +994,7 @@ mod win {
     ) {
         let r = snap(r);
         match bitmap {
-            Some(b) => x.rt.DrawBitmap(
+            Some(b) => x.g.rt.DrawBitmap(
                 b,
                 Some(&rect(r)),
                 1.0,
@@ -915,8 +1002,8 @@ mod win {
                 None,
             ),
             None => {
-                x.brush.SetColor(&pal.placeholder);
-                x.rt.FillRoundedRectangle(&rounded(r, radius), &x.brush);
+                x.g.brush.SetColor(&pal.placeholder);
+                x.g.rt.FillRoundedRectangle(&rounded(r, radius), &x.g.brush);
             }
         }
     }

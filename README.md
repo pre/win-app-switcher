@@ -5,7 +5,8 @@ macOS-style application switching for Windows.
 How it differs from the built-in alt-tab:
 
 - **WIN+TAB** shows one icon per running application — alt-tab shows every
-  window of everything.
+  window of everything. A quick tap switches applications instantly, with
+  no dialog at all.
 - **WIN+§** (Nordic keyboard) or **WIN+`** (US keyboard) lists all windows
   of the active application. A quick tap switches to the next window
   instantly, with no dialog at all.
@@ -20,7 +21,8 @@ How it differs from the built-in alt-tab:
 
 | Input | Action |
 |-------|--------|
-| `WIN+TAB` / `WIN+SHIFT+TAB` | Next / previous application |
+| `WIN+TAB` (tap) | Switch to the previous application, no UI |
+| `WIN+TAB` (held) | Icon row; `TAB` = next, `SHIFT+TAB` = previous |
 | `WIN+§` (tap) | Switch to the next window of the active app, no UI |
 | `WIN+§` (held) | Window list; `§` = next, `SHIFT+§` = previous |
 | Arrow keys / mouse hover | Move the selection |

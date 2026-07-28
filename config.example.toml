@@ -20,8 +20,8 @@
 # Which monitor the dialog opens on. ("mouse" | "primary")
 #dialog_monitor = "mouse"
 
-# WIN+§ shows the window list only after this delay (ms).
-# A quicker tap switches windows with no UI.
+# WIN+TAB and WIN+§ show their dialog only after this delay (ms).
+# A quicker tap switches with no UI.
 #dialog_delay_ms = 150
 
 # Check GitHub daily for a newer release and notify from the tray.

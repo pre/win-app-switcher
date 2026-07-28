@@ -326,35 +326,36 @@ mod win {
         ctx.list
     }
 
-    /// One running application for the app switcher: display name, icon key
-    /// and all its windows in z-order (members[0] is the app's topmost).
+    /// One running application for the app switcher: its identity and all its
+    /// windows in z-order (windows[0] is the app's topmost).
     pub struct AppGroup {
-        pub name: String,
-        /// Shell parsing name for [`icon_bgra`].
-        pub icon: String,
+        pub key: AppKey,
         pub windows: Vec<HWND>,
     }
 
-    /// One group per running app, most-recently-used first.
+    /// One group per running app, most-recently-used first. Deliberately
+    /// nothing but enumeration and grouping: a quick WIN+TAB tap switches
+    /// without ever showing a dialog, so resolving names and icons is left to
+    /// [`crate::ui::show`], which runs only once a dialog is actually due.
     pub fn app_groups(all_desktops: bool) -> Vec<AppGroup> {
         group_by_key(eligible_windows(all_desktops))
             .into_iter()
-            .map(|(key, windows)| AppGroup {
-                name: app_name(&key),
-                icon: icon_source(&key),
-                windows,
-            })
+            .map(|(key, windows)| AppGroup { key, windows })
             .collect()
+    }
+
+    /// Resolve and cache everything drawing one app needs, so the first
+    /// switcher of the session does not pay for it. `icon_px` is the size the
+    /// icon row draws at; a different size later just costs one downscale.
+    pub fn warm(key: &AppKey, icon_px: u32) {
+        let _ = icon_bgra(&icon_source(key), icon_px);
     }
 
     /// Display name for a group: a PWA/UWP app resolves its AUMID to the real
     /// app name ("ChatGPT"), so it doesn't read as "Google Chrome". Plain
     /// windows fall back to the exe's FileDescription.
     pub fn app_name(key: &AppKey) -> String {
-        key.aumid
-            .as_deref()
-            .and_then(|id| unsafe { aumid_display_name(id) })
-            .unwrap_or_else(|| display_name(&key.exe))
+        app_label(key).0
     }
 
     /// Shell parsing name whose icon represents the app. Claude's packaged app
@@ -363,6 +364,37 @@ mod win {
     /// AppsFolder, which selects their unplated/app-list artwork correctly.
     /// Plain Win32 apps use the exe's embedded icon.
     pub fn icon_source(key: &AppKey) -> String {
+        app_label(key).1
+    }
+
+    /// `(display name, icon source)` for an app identity, memoized for the
+    /// process lifetime. Both resolve through the shell — AppsFolder parsing
+    /// plus `GetDisplayName`, or the exe's version resource — and both run for
+    /// every group at session start, which is squarely on the path between
+    /// WIN+TAB and the dialog appearing. Neither can change while the app runs.
+    fn app_label(key: &AppKey) -> (String, String) {
+        thread_local! {
+            static CACHE: RefCell<HashMap<String, (String, String)>> =
+                RefCell::new(HashMap::new());
+        }
+        CACHE.with_borrow_mut(|cache| {
+            if let Some(label) = cache.get(key.id()) {
+                return label.clone();
+            }
+            let label = (load_app_name(key), load_icon_source(key));
+            cache.insert(key.id().to_string(), label.clone());
+            label
+        })
+    }
+
+    fn load_app_name(key: &AppKey) -> String {
+        key.aumid
+            .as_deref()
+            .and_then(|id| unsafe { aumid_display_name(id) })
+            .unwrap_or_else(|| display_name(&key.exe))
+    }
+
+    fn load_icon_source(key: &AppKey) -> String {
         key.aumid
             .as_deref()
             .filter(|id| use_direct_package_logo(id))
@@ -432,7 +464,31 @@ mod win {
     /// otherwise the window falls back to grouping and iconing by its exe.
     unsafe fn window_aumid(hwnd: HWND) -> Option<String> {
         let aumid = process_aumid(hwnd).or_else(|| window_prop_aumid(hwnd))?;
-        aumid_shell_item(&aumid).map(|_| aumid)
+        aumid_registered(&aumid).then_some(aumid)
+    }
+
+    /// Whether an AUMID names a real AppsFolder app, memoized: the parse runs
+    /// once per window on every session start and is one of the slowest shell
+    /// calls on that path. A negative answer is only cached for
+    /// [`RETRY_UNREGISTERED`] so a PWA installed while we run is picked up
+    /// without a restart; a positive answer holds for the process lifetime.
+    unsafe fn aumid_registered(aumid: &str) -> bool {
+        const RETRY_UNREGISTERED: Duration = Duration::from_secs(60);
+        thread_local! {
+            // Ok = registered, Err = when the lookup last came up empty.
+            static CACHE: RefCell<HashMap<String, Result<(), Instant>>> =
+                RefCell::new(HashMap::new());
+        }
+        CACHE.with_borrow_mut(|cache| {
+            match cache.get(aumid) {
+                Some(Ok(())) => return true,
+                Some(Err(t)) if t.elapsed() < RETRY_UNREGISTERED => return false,
+                _ => {}
+            }
+            let found = aumid_shell_item(aumid).is_some();
+            cache.insert(aumid.to_string(), found.then_some(()).ok_or_else(Instant::now));
+            found
+        })
     }
 
     /// AUMID from the owning process's packaged identity; `None` for
