@@ -99,8 +99,7 @@ pub fn downscale_premul_bgra(src: &[u8], src_px: u32, dst_px: u32) -> Vec<u8> {
 /// (unassociated) alpha. The shell's `GetImage` hands some icons back
 /// premultiplied and others straight — packaged-app assets (1Password, Teams)
 /// and a few Win32 apps (VS Code) come through straight — but the rest of the
-/// pipeline (the D2D bitmap's alpha mode and [`downscale_premul_bgra`]) assumes
-/// premultiplied. A straight-alpha edge pixel keeps its full-strength color
+/// pipeline assumes premultiplied. A straight-alpha edge pixel keeps its full-strength color
 /// (often near-white antialiasing) under a partial alpha, which then blends as
 /// a bright fringe. Valid premultiplied data can never have a color channel
 /// exceed its alpha, so a single pixel that does proves the whole image is
@@ -122,12 +121,64 @@ pub fn premultiply_bgra(bits: &mut [u8]) {
     }
 }
 
+fn xml_attr(tag: &str, name: &str) -> Option<String> {
+    let mut rest = tag;
+    while let Some(pos) = rest.find(name) {
+        let boundary = pos == 0 || rest[..pos].ends_with(char::is_whitespace);
+        rest = &rest[pos + name.len()..];
+        let after = rest.trim_start();
+        if !boundary || !after.starts_with('=') {
+            continue;
+        }
+        let value = after[1..].trim_start();
+        let quote = value.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            continue;
+        }
+        let value = &value[quote.len_utf8()..];
+        let end = value.find(quote)?;
+        return Some(value[..end].to_string());
+    }
+    None
+}
+
+fn use_direct_package_logo(aumid: &str) -> bool {
+    aumid == "Claude_pzs8sxrjxfjjc!Claude"
+}
+
+fn manifest_logo_path(manifest: &str, aumid: &str) -> Option<String> {
+    let (_, app_id) = aumid.split_once('!')?;
+    let mut rest = manifest;
+    while let Some(start) = rest.find("<Application ") {
+        rest = &rest[start..];
+        let tag_end = rest.find('>')?;
+        let tag = &rest[..=tag_end];
+        if tag[..tag_end].trim_end().ends_with('/') {
+            rest = &rest[tag_end + 1..];
+            continue;
+        }
+        let Some(close) = rest[tag_end + 1..].find("</Application>") else {
+            break;
+        };
+        let close = close + tag_end + 1;
+        let body = &rest[tag_end + 1..close];
+        if xml_attr(tag, "Id").as_deref() == Some(app_id) {
+            let visual_start = body.find("VisualElements")?;
+            let visual = &body[visual_start..];
+            let visual_end = visual.find('>')?;
+            return xml_attr(&visual[..=visual_end], "Square150x150Logo");
+        }
+        rest = &rest[close + "</Application>".len()..];
+    }
+    None
+}
+
 #[cfg(windows)]
 pub use win::*;
 
 #[cfg(windows)]
 mod win {
-    use super::{group_by_key, AppKey};
+    use super::{group_by_key, manifest_logo_path, use_direct_package_logo, AppKey};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -158,6 +209,7 @@ mod win {
     use windows::Win32::UI::Shell::{
         IShellItem, IShellItemImageFactory, IVirtualDesktopManager, SHCreateItemFromParsingName,
         VirtualDesktopManager, SIGDN_NORMALDISPLAY, SIIGBF, SIIGBF_ICONONLY, SIIGBF_SCALEUP,
+        SIIGBF_THUMBNAILONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetForegroundWindow, GetParent,
@@ -240,17 +292,42 @@ mod win {
             .unwrap_or_else(|| display_name(&key.exe))
     }
 
-    /// Shell parsing name whose icon represents the app: an app with an
-    /// AppUserModelID (a packaged UWP process, or a Chrome/Edge PWA that tags
-    /// its window) resolves through its `shell:AppsFolder` entry, which
-    /// carries the app's real icon. The exe alone yields a blank icon for UWP
-    /// and the generic browser icon for a PWA. Everything else resolves
-    /// through the exe path itself.
+    /// Shell parsing name whose icon represents the app. Claude's packaged app
+    /// uses its original 150×150 manifest logo because AppsFolder renders it
+    /// visibly soft. Other packaged apps and Chrome/Edge PWAs keep using
+    /// AppsFolder, which selects their unplated/app-list artwork correctly.
+    /// Plain Win32 apps use the exe's embedded icon.
     pub fn icon_source(key: &AppKey) -> String {
         key.aumid
             .as_deref()
-            .map(|id| format!("shell:AppsFolder\\{id}"))
+            .filter(|id| use_direct_package_logo(id))
+            .and_then(|id| packaged_logo_source(&key.exe, id))
+            .or_else(|| {
+                key.aumid
+                    .as_deref()
+                    .map(|id| format!("shell:AppsFolder\\{id}"))
+            })
             .unwrap_or_else(|| key.exe.clone())
+    }
+
+    fn packaged_logo_source(exe: &str, aumid: &str) -> Option<String> {
+        let exe = std::path::Path::new(exe);
+        for dir in exe.ancestors().skip(1) {
+            let manifest_path = dir.join("AppxManifest.xml");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            let manifest = std::fs::read_to_string(manifest_path).ok()?;
+            let relative = manifest_logo_path(&manifest, aumid)?;
+            let logo = dir.join(relative.replace('\\', std::path::MAIN_SEPARATOR_STR));
+            if logo.is_file() {
+                #[cfg(debug_assertions)]
+                println!("package logo: {}", logo.display());
+                return Some(logo.to_string_lossy().into_owned());
+            }
+            return None;
+        }
+        None
     }
 
     /// The `shell:AppsFolder\{aumid}` shell item, or `None` when the AUMID
@@ -381,30 +458,25 @@ mod win {
         (!name.is_empty()).then_some(name)
     }
 
-    /// Premultiplied BGRA pixels (px × px) of the shell icon behind a parsing
-    /// name (exe path or `shell:AppsFolder` entry, see [`icon_source`]). The
-    /// 256 px master frame is cached for the process lifetime — cold
-    /// extraction can take ~100 ms — and downscaled per request, so `px` may
-    /// differ between calls (per-monitor DPI, both dialogs). A failure is
-    /// retried after `RETRY_FAILED`: quick enough to recover from a transient
-    /// failure (shell not ready at logon) without re-probing a slow-failing
-    /// path (dead network share) on every dialog open.
-    pub fn icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
+    /// Premultiplied BGRA pixels (px × px) of the shell image behind a parsing
+    /// name (exe path, package PNG or `shell:AppsFolder` entry). The 256 px
+    /// master is cached for the process lifetime and downscaled per request.
+    pub fn icon_bgra(source: &str, px: u32) -> Option<Vec<u8>> {
         const MASTER: u32 = 256;
         const RETRY_FAILED: Duration = Duration::from_secs(60);
         thread_local! {
-            // Ok = icon, Err = when extraction last failed.
+            // Ok = image pixels, Err = when extraction last failed.
             static CACHE: RefCell<HashMap<String, Result<Vec<u8>, Instant>>> =
                 RefCell::new(HashMap::new());
         }
         let master = CACHE.with_borrow_mut(|cache| {
-            match cache.get(exe) {
+            match cache.get(source) {
                 Some(Ok(v)) => return Some(v.clone()),
                 Some(Err(t)) if t.elapsed() < RETRY_FAILED => return None,
                 _ => {}
             }
-            let loaded = unsafe { load_icon_bgra(exe, MASTER) };
-            cache.insert(exe.to_string(), loaded.clone().ok_or_else(Instant::now));
+            let loaded = unsafe { load_icon_bgra(source, MASTER) };
+            cache.insert(source.to_string(), loaded.clone().ok_or_else(Instant::now));
             loaded
         })?;
         Some(if px == MASTER {
@@ -414,21 +486,21 @@ mod win {
         })
     }
 
-    /// The icon's native `px` (256) frame via the shell.
-    unsafe fn load_icon_bgra(exe: &str, px: u32) -> Option<Vec<u8>> {
-        let wide: Vec<u16> = exe.encode_utf16().chain([0]).collect();
+    unsafe fn load_icon_bgra(source: &str, px: u32) -> Option<Vec<u8>> {
+        let wide: Vec<u16> = source.encode_utf16().chain([0]).collect();
         let item: IShellItemImageFactory =
             SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>).ok()?;
-        // The 256 px frame is the icon's native high-res image, so the shell
-        // does no resampling of its own; callers downscale in premultiplied
-        // space (see downscale_premul_bgra) — asking the shell for the target
-        // size directly leaves a white fringe around the edges. SCALEUP
-        // stretches icons that lack a 256 frame instead of padding them.
-        let src = px;
-        let cx = src as i32;
-        // GetImage output is AlphaBlend-ready: 32-bit premultiplied BGRA.
+        let cx = px as i32;
+        let kind = if std::path::Path::new(source)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+        {
+            SIIGBF_THUMBNAILONLY.0
+        } else {
+            SIIGBF_ICONONLY.0
+        };
         let bitmap = item
-            .GetImage(SIZE { cx, cy: cx }, SIIGBF(SIIGBF_ICONONLY.0 | SIIGBF_SCALEUP.0))
+            .GetImage(SIZE { cx, cy: cx }, SIIGBF(kind | SIIGBF_SCALEUP.0))
             .ok()?;
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -442,13 +514,13 @@ mod win {
             },
             ..Default::default()
         };
-        let mut bits = vec![0u8; (src * src * 4) as usize];
+        let mut bits = vec![0u8; (px * px * 4) as usize];
         let dc = CreateCompatibleDC(None);
         let lines = GetDIBits(
             dc,
             bitmap,
             0,
-            src,
+            px,
             Some(bits.as_mut_ptr() as *mut _),
             &mut info,
             DIB_RGB_COLORS,
@@ -766,6 +838,51 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].1, vec![1, 3]);
         assert_eq!(groups[1].1, vec![2]);
+    }
+
+    #[test]
+    fn direct_package_logo_is_limited_to_known_blurry_apps() {
+        assert!(use_direct_package_logo("Claude_pzs8sxrjxfjjc!Claude"));
+        assert!(!use_direct_package_logo("91750D7E.Slack_8she8kybcnzg4!Slack"));
+        assert!(!use_direct_package_logo("MSTeams_8wekyb3d8bbwe!MSTeams"));
+    }
+
+    #[test]
+    fn manifest_logo_selects_matching_packaged_application() {
+        let manifest = r#"
+            <Package xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10">
+              <Applications>
+                <Application Id="Other">
+                  <uap:VisualElements Square150x150Logo="Assets\Other.png" />
+                </Application>
+                <Application uap10:HostId="Hosted" Id="Claude">
+                  <uap:VisualElements
+                    Square44x44Logo="Assets\Small.png"
+                    Square150x150Logo="Assets\Claude.png" />
+                </Application>
+              </Applications>
+            </Package>
+        "#;
+
+        assert_eq!(
+            manifest_logo_path(manifest, "Package_family!Other"),
+            Some(r"Assets\Other.png".into())
+        );
+        assert_eq!(
+            manifest_logo_path(manifest, "Claude_pzs8sxrjxfjjc!Claude"),
+            Some(r"Assets\Claude.png".into())
+        );
+    }
+
+    #[test]
+    fn manifest_logo_rejects_non_packaged_and_unknown_apps() {
+        let manifest = r#"<Application Id="Claude"><uap:VisualElements Square150x150Logo="Assets\Claude.png" /></Application>"#;
+
+        assert_eq!(manifest_logo_path(manifest, "not-an-aumid"), None);
+        assert_eq!(
+            manifest_logo_path(manifest, "Claude_pzs8sxrjxfjjc!Other"),
+            None
+        );
     }
 
     #[test]
