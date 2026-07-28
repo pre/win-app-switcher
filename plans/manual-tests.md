@@ -206,26 +206,39 @@ Next/Prev event and `activate candidate i/N` on commit.
    **not** appear as a ghost entry.
 
 ### UWP icons
+
+The icon fixes are derived from the pixels, not from a list of app
+identities, so these checks are the only thing that establishes them.
+
 4. Open Settings and Calculator: both show their real icons in the WIN+TAB
    row and in the WIN+§ list header — not the dim placeholder.
+5. Claude (packaged app): its icon is sharp, not the soft AppsFolder
+   render. A debug build logs `icon: ... out-sharpens ...` for it.
+6. ChatGPT (Chrome PWA): the monochrome mark sits on the taskbar's white
+   plate, and the plated square's corners are rounded like the other
+   icons — no hard rectangle.
+7. A square Edge PWA: full-bleed artwork gets rounded corners too.
+8. Slack, Teams, Settings and Calculator look exactly as they do today:
+   unplated, correctly sized, no corner rounding, no swap to a package
+   asset. A debug build logs no `out-sharpens` line for any of them.
 
 ### Unelevated degradation
-5. Start the exe normally (no admin): a tray balloon warns once about
+9. Start the exe normally (no admin): a tray balloon warns once about
    running without administrator rights; switching still works.
-6. Focus an elevated window (admin terminal): WIN+TAB does nothing while it
-   has focus — expected — and works again when focus moves elsewhere.
-7. Start elevated: no balloon.
+10. Focus an elevated window (admin terminal): WIN+TAB does nothing while
+    it has focus — expected — and works again when focus moves elsewhere.
+11. Start elevated: no balloon.
 
 ### Task Scheduler autostart
-8. The README `schtasks` recipe: after logging out and in, the switcher is
-   running elevated (Task Manager shows "elevated: yes") with no UAC prompt
-   and no balloon.
+12. The README `schtasks` recipe: after logging out and in, the switcher is
+    running elevated (Task Manager shows "elevated: yes") with no UAC prompt
+    and no balloon.
 
 ### Per-monitor DPI
-9. On a display scaled >100% (e.g. 150%), both dialogs are sharp — text
-   and icons show no bitmap-stretch blur — and visually the same size as
-   on a 100% display.
-10. Mixed-DPI monitors, `dialog_monitor = "mouse"`: the dialog opens
+13. On a display scaled >100% (e.g. 150%), both dialogs are sharp — text
+    and icons show no bitmap-stretch blur — and visually the same size as
+    on a 100% display.
+14. Mixed-DPI monitors, `dialog_monitor = "mouse"`: the dialog opens
     correctly sized and centered on whichever monitor the mouse is on,
     both ways; mouse hover still tracks the icons/rows accurately.
 

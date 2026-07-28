@@ -172,17 +172,129 @@ fn xml_attr(tag: &str, name: &str) -> Option<String> {
     }
 }
 
-fn use_direct_package_logo(aumid: &str) -> bool {
-    aumid == "Claude_pzs8sxrjxfjjc!Claude"
+/// The two shell parsing names whose artwork could represent one app: the
+/// `primary` the shell itself picks, and an `alternate` the app ships in its
+/// package. Which one is drawn is decided from the pixels, not from the app's
+/// identity — see [`prefers_alternate_icon`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct IconSource {
+    pub primary: String,
+    pub alternate: Option<String>,
 }
 
-fn use_icon_background(source: &str) -> bool {
-    source.starts_with("shell:AppsFolder\\Chrome._crx_cadlkdcgmdikeeg.")
+/// Perceived luma of one premultiplied BGRA pixel.
+fn premul_luma(p: &[u8]) -> f32 {
+    0.114 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.299 * f32::from(p[2])
 }
 
-fn round_icon_background(source: &str) -> bool {
-    use_icon_background(source)
-        || source == "shell:AppsFolder\\f6cbcda5-b021-4d0e-9fd7-4c5b41ea0aad"
+/// How crisp an image's edges are, as the *root-mean-square* neighbour
+/// gradient of premultiplied luma divided by the image's own luma standard
+/// deviation.
+///
+/// Squaring before averaging is what makes this measure blur at all. Mean
+/// absolute gradient sums to the total variation across an edge, which a blur
+/// preserves — it spreads the same climb over more pixels — so it ranks a soft
+/// edge no lower than a hard one. Squaring rewards the concentrated jump: one
+/// step of 120 beats six steps of 20.
+///
+/// Dividing by contrast is what makes two independent renders of the same mark
+/// comparable: padding and palette differences move both the gradient and the
+/// spread together and largely cancel, leaving softness as the thing measured.
+/// A flat image has no edges to judge and scores 0.
+pub fn sharpness(bits: &[u8], px: u32) -> f32 {
+    let n = px as usize;
+    if n < 2 || bits.len() < n * n * 4 {
+        return 0.0;
+    }
+    let luma: Vec<f32> = bits.chunks_exact(4).take(n * n).map(premul_luma).collect();
+    let mean = luma.iter().sum::<f32>() / luma.len() as f32;
+    let sd = (luma.iter().map(|l| (l - mean) * (l - mean)).sum::<f32>() / luma.len() as f32).sqrt();
+    if sd < 1e-3 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    let mut count = 0.0;
+    for y in 0..n {
+        for x in 0..n {
+            let l = luma[y * n + x];
+            if x + 1 < n {
+                sum += (luma[y * n + x + 1] - l).powi(2);
+                count += 1.0;
+            }
+            if y + 1 < n {
+                sum += (luma[(y + 1) * n + x] - l).powi(2);
+                count += 1.0;
+            }
+        }
+    }
+    (sum / count).sqrt() / sd
+}
+
+/// Margin by which a packaged app's own logo must out-sharpen the shell's
+/// render before it is preferred. A near-tie keeps the shell artwork, which
+/// carries the unplated styling and visual sizing the taskbar uses.
+///
+/// A genuinely soft AppsFolder render — a small asset scaled up to 256 — lands
+/// around 1.8–2.8× below its own native artwork, so this sits clear of the
+/// noise between two good renders without needing the gap to be that wide.
+const ALTERNATE_SHARPNESS_MARGIN: f32 = 1.15;
+
+/// Whether the app's packaged logo is visibly sharper than the shell's render
+/// of the same app, i.e. AppsFolder is handing back a soft image.
+pub fn prefers_alternate_icon(primary: &[u8], alternate: &[u8], px: u32) -> bool {
+    let base = sharpness(primary, px);
+    base > 0.0 && sharpness(alternate, px) > base * ALTERNATE_SHARPNESS_MARGIN
+}
+
+/// Whether an icon is a transparent monochrome glyph that needs the taskbar's
+/// white plate behind it: it has a genuine transparent area, and its opaque
+/// ink is near-neutral and dark. A colorful mark, or one that already fills
+/// its square, is left alone.
+pub fn wants_icon_plate(bits: &[u8]) -> bool {
+    const CLEAR: u8 = 32;
+    const OPAQUE: u8 = 200;
+    let total = bits.len() / 4;
+    if total == 0 {
+        return false;
+    }
+    let (mut clear, mut ink) = (0usize, 0usize);
+    let (mut chroma, mut luma) = (0.0f32, 0.0f32);
+    for p in bits.chunks_exact(4) {
+        if p[3] < CLEAR {
+            clear += 1;
+            continue;
+        }
+        if p[3] < OPAQUE {
+            continue;
+        }
+        // Alpha is near 255 here, so premultiplied and straight agree to
+        // within a percent and the channels can be read as color directly.
+        let (b, g, r) = (f32::from(p[0]), f32::from(p[1]), f32::from(p[2]));
+        chroma += b.max(g).max(r) - b.min(g).min(r);
+        luma += premul_luma(p);
+        ink += 1;
+    }
+    // Enough ink to judge, and enough clear space that a plate would show.
+    if ink * 100 < total || clear * 10 < total {
+        return false;
+    }
+    chroma / ink as f32 <= 32.0 && luma / ink as f32 <= 100.0
+}
+
+/// Whether an image is a full-bleed square: its whole border ring is opaque,
+/// with no transparent margin anywhere along it. Such an icon reads as a hard
+/// rectangle next to every other icon's rounded artwork.
+pub fn is_full_bleed(bits: &[u8], px: u32) -> bool {
+    const OPAQUE: u8 = 240;
+    let n = px as usize;
+    if n == 0 || bits.len() < n * n * 4 {
+        return false;
+    }
+    (0..n).all(|i| {
+        [(i, 0), (i, n - 1), (0, i), (n - 1, i)]
+            .iter()
+            .all(|&(x, y)| bits[(y * n + x) * 4 + 3] >= OPAQUE)
+    })
 }
 
 fn round_premul_bgra_corners(bits: &mut [u8], px: u32, radius: u32) {
@@ -241,8 +353,8 @@ pub use win::*;
 #[cfg(windows)]
 mod win {
     use super::{
-        group_by_key, manifest_logo_path, round_icon_background, round_premul_bgra_corners,
-        use_direct_package_logo, use_icon_background, AppKey,
+        group_by_key, is_full_bleed, manifest_logo_path, prefers_alternate_icon,
+        round_premul_bgra_corners, wants_icon_plate, AppKey, IconSource,
     };
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -358,12 +470,11 @@ mod win {
         app_label(key).0
     }
 
-    /// Shell parsing name whose icon represents the app. Claude's packaged app
-    /// uses its original 150×150 manifest logo because AppsFolder renders it
-    /// visibly soft. Other packaged apps and Chrome/Edge PWAs keep using
-    /// AppsFolder, which selects their unplated/app-list artwork correctly.
-    /// Plain Win32 apps use the exe's embedded icon.
-    pub fn icon_source(key: &AppKey) -> String {
+    /// The candidate parsing names whose icon could represent the app: the
+    /// shell's own (`shell:AppsFolder\{aumid}` for a PWA or packaged app, else
+    /// the exe's embedded icon), plus a packaged app's manifest logo as an
+    /// alternate. [`icon_bgra`] renders both and picks by sharpness.
+    pub fn icon_source(key: &AppKey) -> IconSource {
         app_label(key).1
     }
 
@@ -372,9 +483,9 @@ mod win {
     /// plus `GetDisplayName`, or the exe's version resource — and both run for
     /// every group at session start, which is squarely on the path between
     /// WIN+TAB and the dialog appearing. Neither can change while the app runs.
-    fn app_label(key: &AppKey) -> (String, String) {
+    fn app_label(key: &AppKey) -> (String, IconSource) {
         thread_local! {
-            static CACHE: RefCell<HashMap<String, (String, String)>> =
+            static CACHE: RefCell<HashMap<String, (String, IconSource)>> =
                 RefCell::new(HashMap::new());
         }
         CACHE.with_borrow_mut(|cache| {
@@ -394,17 +505,18 @@ mod win {
             .unwrap_or_else(|| display_name(&key.exe))
     }
 
-    fn load_icon_source(key: &AppKey) -> String {
-        key.aumid
-            .as_deref()
-            .filter(|id| use_direct_package_logo(id))
-            .and_then(|id| packaged_logo_source(&key.exe, id))
-            .or_else(|| {
-                key.aumid
-                    .as_deref()
-                    .map(|id| format!("shell:AppsFolder\\{id}"))
-            })
-            .unwrap_or_else(|| key.exe.clone())
+    /// The alternate is resolved for every packaged app, not for a list of
+    /// AUMIDs: an exe with an `AppxManifest.xml` ancestor whose manifest names
+    /// this AUMID has a `Square150x150Logo` to offer. Chrome/Edge PWAs have no
+    /// manifest, so they get no alternate and nothing changes for them.
+    fn load_icon_source(key: &AppKey) -> IconSource {
+        let Some(aumid) = key.aumid.as_deref() else {
+            return IconSource { primary: key.exe.clone(), alternate: None };
+        };
+        IconSource {
+            primary: format!("shell:AppsFolder\\{aumid}"),
+            alternate: packaged_logo_source(&key.exe, aumid),
+        }
     }
 
     fn packaged_logo_source(exe: &str, aumid: &str) -> Option<String> {
@@ -579,10 +691,10 @@ mod win {
         (!name.is_empty()).then_some(name)
     }
 
-    /// Premultiplied BGRA pixels (px × px) of the shell image behind a parsing
-    /// name (exe path, package PNG or `shell:AppsFolder` entry). The 256 px
-    /// master is cached for the process lifetime and downscaled per request.
-    pub fn icon_bgra(source: &str, px: u32) -> Option<Vec<u8>> {
+    /// Premultiplied BGRA pixels (px × px) of the image representing an app.
+    /// The 256 px master is cached for the process lifetime, keyed on the
+    /// source's `primary` name, and downscaled per request.
+    pub fn icon_bgra(source: &IconSource, px: u32) -> Option<Vec<u8>> {
         const MASTER: u32 = 256;
         const RETRY_FAILED: Duration = Duration::from_secs(60);
         thread_local! {
@@ -591,13 +703,13 @@ mod win {
                 RefCell::new(HashMap::new());
         }
         let master = CACHE.with_borrow_mut(|cache| {
-            match cache.get(source) {
+            match cache.get(&source.primary) {
                 Some(Ok(v)) => return Some(v.clone()),
                 Some(Err(t)) if t.elapsed() < RETRY_FAILED => return None,
                 _ => {}
             }
-            let loaded = unsafe { load_icon_bgra(source, MASTER) };
-            cache.insert(source.to_string(), loaded.clone().ok_or_else(Instant::now));
+            let loaded = unsafe { choose_icon_bgra(source, MASTER) };
+            cache.insert(source.primary.clone(), loaded.clone().ok_or_else(Instant::now));
             loaded
         })?;
         Some(if px == MASTER {
@@ -607,7 +719,39 @@ mod win {
         })
     }
 
-    unsafe fn load_icon_bgra(source: &str, px: u32) -> Option<Vec<u8>> {
+    /// Render an app's icon and apply the pixel-derived fixes: prefer the
+    /// packaged logo when the shell's render is visibly soft, re-render behind
+    /// the taskbar plate when the mark is a transparent monochrome glyph, and
+    /// round the corners of a full-bleed square.
+    ///
+    /// The plate and the rounding are scoped to `shell:AppsFolder` images:
+    /// `SIIGBF_ICONBACKGROUND` is only meaningful there, and a package PNG
+    /// chosen for its sharpness is the app's own artwork, drawn as shipped.
+    unsafe fn choose_icon_bgra(source: &IconSource, px: u32) -> Option<Vec<u8>> {
+        let primary = load_icon_bgra(&source.primary, px, false);
+        if let Some(alternate) = source.alternate.as_deref() {
+            if let (Some(base), Some(alt)) = (&primary, load_icon_bgra(alternate, px, false)) {
+                if prefers_alternate_icon(base, &alt, px) {
+                    #[cfg(debug_assertions)]
+                    println!("icon: {alternate} out-sharpens {}", source.primary);
+                    return Some(alt);
+                }
+            }
+        }
+        let mut bits = primary?;
+        if !source.primary.starts_with("shell:AppsFolder\\") {
+            return Some(bits);
+        }
+        if wants_icon_plate(&bits) {
+            bits = load_icon_bgra(&source.primary, px, true)?;
+        }
+        if is_full_bleed(&bits, px) {
+            round_premul_bgra_corners(&mut bits, px, px / 5);
+        }
+        Some(bits)
+    }
+
+    unsafe fn load_icon_bgra(source: &str, px: u32, background: bool) -> Option<Vec<u8>> {
         let wide: Vec<u16> = source.encode_utf16().chain([0]).collect();
         let item: IShellItemImageFactory =
             SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>).ok()?;
@@ -620,15 +764,11 @@ mod win {
         } else {
             SIIGBF_ICONONLY.0
         };
-        let background = if use_icon_background(source) {
-            SIIGBF_ICONBACKGROUND.0
-        } else {
-            0
-        };
+        let plate = if background { SIIGBF_ICONBACKGROUND.0 } else { 0 };
         let bitmap = item
             .GetImage(
                 SIZE { cx, cy: cx },
-                SIIGBF(kind | background | SIIGBF_SCALEUP.0),
+                SIIGBF(kind | plate | SIIGBF_SCALEUP.0),
             )
             .ok()?;
         let mut info = BITMAPINFO {
@@ -663,9 +803,6 @@ mod win {
         // contract the rest of the pipeline relies on; correct them here so
         // edges don't blend as a bright fringe.
         super::premultiply_bgra(&mut bits);
-        if round_icon_background(source) {
-            round_premul_bgra_corners(&mut bits, px, px / 5);
-        }
         Some(bits)
     }
 
@@ -972,17 +1109,79 @@ mod tests {
         assert_eq!(groups[1].1, vec![2]);
     }
 
+    /// px×px premultiplied BGRA, `f(x, y) -> (b, g, r, a)`.
+    fn image(px: u32, f: impl Fn(u32, u32) -> (u8, u8, u8, u8)) -> Vec<u8> {
+        let mut bits = Vec::with_capacity((px * px * 4) as usize);
+        for y in 0..px {
+            for x in 0..px {
+                let (b, g, r, a) = f(x, y);
+                bits.extend_from_slice(&[b, g, r, a]);
+            }
+        }
+        bits
+    }
+
+    /// A dark disc on a transparent field: the shape both icon tests need.
+    fn disc(px: u32, soft: bool) -> Vec<u8> {
+        let c = px as f32 / 2.0;
+        let r = px as f32 / 3.0;
+        image(px, |x, y| {
+            let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
+            // A hard step at the radius, or a several-pixel ramp across it.
+            let cover = if soft {
+                ((r + 3.0 - d) / 6.0).clamp(0.0, 1.0)
+            } else {
+                f32::from(d <= r)
+            };
+            let a = (cover * 255.0).round() as u8;
+            // Premultiplied dark ink: color scales with coverage.
+            let ink = (cover * 40.0).round() as u8;
+            (ink, ink, ink, a)
+        })
+    }
+
     #[test]
-    fn rounded_background_is_limited_to_square_pwa_icons() {
-        assert!(round_icon_background(
-            "shell:AppsFolder\\Chrome._crx_cadlkdcgmdikeeg.UserData.Profile1"
-        ));
-        assert!(round_icon_background(
-            "shell:AppsFolder\\f6cbcda5-b021-4d0e-9fd7-4c5b41ea0aad"
-        ));
-        assert!(!round_icon_background(
-            "shell:AppsFolder\\91750D7E.Slack_8she8kybcnzg4!Slack"
-        ));
+    fn sharpness_ranks_a_soft_edge_below_a_hard_one() {
+        const PX: u32 = 64;
+        assert!(sharpness(&disc(PX, false), PX) > sharpness(&disc(PX, true), PX));
+        // A flat image has no edge to judge.
+        assert_eq!(sharpness(&vec![255u8; (PX * PX * 4) as usize], PX), 0.0);
+    }
+
+    #[test]
+    fn alternate_icon_wins_only_on_a_clear_sharpness_margin() {
+        const PX: u32 = 64;
+        let (sharp, soft) = (disc(PX, false), disc(PX, true));
+        assert!(prefers_alternate_icon(&soft, &sharp, PX));
+        // A near-tie (the same render twice) keeps the shell's artwork.
+        assert!(!prefers_alternate_icon(&sharp, &sharp.clone(), PX));
+        assert!(!prefers_alternate_icon(&sharp, &soft, PX));
+    }
+
+    #[test]
+    fn plate_is_wanted_only_by_dark_monochrome_marks_with_transparency() {
+        const PX: u32 = 64;
+        assert!(wants_icon_plate(&disc(PX, false)));
+        // Same shape in saturated blue: colorful marks carry their own look.
+        let c = PX as f32 / 2.0;
+        let colorful = image(PX, |x, y| {
+            let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
+            if d <= PX as f32 / 3.0 { (220, 90, 20, 255) } else { (0, 0, 0, 0) }
+        });
+        assert!(!wants_icon_plate(&colorful));
+        // No transparent area at all: a plate would never show.
+        assert!(!wants_icon_plate(&vec![10u8; (PX * PX * 4) as usize]));
+    }
+
+    #[test]
+    fn full_bleed_requires_an_opaque_border_all_the_way_round() {
+        const PX: u32 = 16;
+        assert!(is_full_bleed(&vec![255u8; (PX * PX * 4) as usize], PX));
+        // A transparent margin anywhere along the ring disqualifies it.
+        let mut margin = vec![255u8; (PX * PX * 4) as usize];
+        margin[((3 * PX) as usize) * 4 + 3] = 0; // (0, 3)
+        assert!(!is_full_bleed(&margin, PX));
+        assert!(!is_full_bleed(&disc(PX, false), PX));
     }
 
     #[test]
@@ -995,26 +1194,6 @@ mod tests {
         }
         assert_eq!(&bits[(0 * 8 + 1) * 4..][..4], &[255, 255, 255, 255]);
         assert_eq!(&bits[(4 * 8 + 4) * 4..][..4], &[255, 255, 255, 255]);
-    }
-
-    #[test]
-    fn icon_background_is_limited_to_chatgpt_pwa() {
-        assert!(use_icon_background(
-            "shell:AppsFolder\\Chrome._crx_cadlkdcgmdikeeg.UserData.Profile1"
-        ));
-        assert!(!use_icon_background(
-            "shell:AppsFolder\\91750D7E.Slack_8she8kybcnzg4!Slack"
-        ));
-        assert!(!use_icon_background(
-            "shell:AppsFolder\\Chrome._crx_other.UserData.Profile1"
-        ));
-    }
-
-    #[test]
-    fn direct_package_logo_is_limited_to_known_blurry_apps() {
-        assert!(use_direct_package_logo("Claude_pzs8sxrjxfjjc!Claude"));
-        assert!(!use_direct_package_logo("91750D7E.Slack_8she8kybcnzg4!Slack"));
-        assert!(!use_direct_package_logo("MSTeams_8wekyb3d8bbwe!MSTeams"));
     }
 
     #[test]

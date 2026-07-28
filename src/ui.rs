@@ -467,7 +467,7 @@ mod win {
     pub fn show_list(
         main_hwnd: HWND,
         name: &str,
-        icon_src: &str,
+        icon_src: &crate::apps::IconSource,
         titles: &[String],
         kb: usize,
         cfg: &Config,
