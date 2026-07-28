@@ -150,6 +150,34 @@ fn use_icon_background(source: &str) -> bool {
     source.starts_with("shell:AppsFolder\\Chrome._crx_cadlkdcgmdikeeg.")
 }
 
+fn round_icon_background(source: &str) -> bool {
+    use_icon_background(source)
+        || source == "shell:AppsFolder\\f6cbcda5-b021-4d0e-9fd7-4c5b41ea0aad"
+}
+
+fn round_premul_bgra_corners(bits: &mut [u8], px: u32, radius: u32) {
+    let px = px as usize;
+    let radius = radius.min(px as u32 / 2) as usize;
+    debug_assert_eq!(bits.len(), px * px * 4);
+    for y in 0..radius {
+        for x in 0..radius {
+            let dx = radius as f32 - x as f32 - 0.5;
+            let dy = radius as f32 - y as f32 - 0.5;
+            if dx * dx + dy * dy <= (radius * radius) as f32 {
+                continue;
+            }
+            for (px_x, px_y) in [
+                (x, y),
+                (px - 1 - x, y),
+                (x, px - 1 - y),
+                (px - 1 - x, px - 1 - y),
+            ] {
+                bits[(px_y * px + px_x) * 4..][..4].fill(0);
+            }
+        }
+    }
+}
+
 fn manifest_logo_path(manifest: &str, aumid: &str) -> Option<String> {
     let (_, app_id) = aumid.split_once('!')?;
     let mut rest = manifest;
@@ -183,7 +211,8 @@ pub use win::*;
 #[cfg(windows)]
 mod win {
     use super::{
-        group_by_key, manifest_logo_path, use_direct_package_logo, use_icon_background, AppKey,
+        group_by_key, manifest_logo_path, round_icon_background, round_premul_bgra_corners,
+        use_direct_package_logo, use_icon_background, AppKey,
     };
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -548,6 +577,9 @@ mod win {
         // contract the rest of the pipeline relies on; correct them here so
         // edges don't blend as a bright fringe.
         super::premultiply_bgra(&mut bits);
+        if round_icon_background(source) {
+            round_premul_bgra_corners(&mut bits, px, px / 5);
+        }
         Some(bits)
     }
 
@@ -852,6 +884,31 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].1, vec![1, 3]);
         assert_eq!(groups[1].1, vec![2]);
+    }
+
+    #[test]
+    fn rounded_background_is_limited_to_square_pwa_icons() {
+        assert!(round_icon_background(
+            "shell:AppsFolder\\Chrome._crx_cadlkdcgmdikeeg.UserData.Profile1"
+        ));
+        assert!(round_icon_background(
+            "shell:AppsFolder\\f6cbcda5-b021-4d0e-9fd7-4c5b41ea0aad"
+        ));
+        assert!(!round_icon_background(
+            "shell:AppsFolder\\91750D7E.Slack_8she8kybcnzg4!Slack"
+        ));
+    }
+
+    #[test]
+    fn rounded_background_mask_clears_only_corner_pixels() {
+        let mut bits = vec![255u8; 8 * 8 * 4];
+        round_premul_bgra_corners(&mut bits, 8, 2);
+
+        for (x, y) in [(0, 0), (7, 0), (0, 7), (7, 7)] {
+            assert_eq!(&bits[(y * 8 + x) * 4..][..4], &[0, 0, 0, 0]);
+        }
+        assert_eq!(&bits[(0 * 8 + 1) * 4..][..4], &[255, 255, 255, 255]);
+        assert_eq!(&bits[(4 * 8 + 4) * 4..][..4], &[255, 255, 255, 255]);
     }
 
     #[test]
