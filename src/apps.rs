@@ -146,6 +146,10 @@ fn use_direct_package_logo(aumid: &str) -> bool {
     aumid == "Claude_pzs8sxrjxfjjc!Claude"
 }
 
+fn use_icon_background(source: &str) -> bool {
+    source.starts_with("shell:AppsFolder\\Chrome._crx_cadlkdcgmdikeeg.")
+}
+
 fn manifest_logo_path(manifest: &str, aumid: &str) -> Option<String> {
     let (_, app_id) = aumid.split_once('!')?;
     let mut rest = manifest;
@@ -178,7 +182,9 @@ pub use win::*;
 
 #[cfg(windows)]
 mod win {
-    use super::{group_by_key, manifest_logo_path, use_direct_package_logo, AppKey};
+    use super::{
+        group_by_key, manifest_logo_path, use_direct_package_logo, use_icon_background, AppKey,
+    };
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -208,8 +214,8 @@ mod win {
     };
     use windows::Win32::UI::Shell::{
         IShellItem, IShellItemImageFactory, IVirtualDesktopManager, SHCreateItemFromParsingName,
-        VirtualDesktopManager, SIGDN_NORMALDISPLAY, SIIGBF, SIIGBF_ICONONLY, SIIGBF_SCALEUP,
-        SIIGBF_THUMBNAILONLY,
+        VirtualDesktopManager, SIGDN_NORMALDISPLAY, SIIGBF, SIIGBF_ICONBACKGROUND, SIIGBF_ICONONLY,
+        SIIGBF_SCALEUP, SIIGBF_THUMBNAILONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetForegroundWindow, GetParent,
@@ -499,8 +505,16 @@ mod win {
         } else {
             SIIGBF_ICONONLY.0
         };
+        let background = if use_icon_background(source) {
+            SIIGBF_ICONBACKGROUND.0
+        } else {
+            0
+        };
         let bitmap = item
-            .GetImage(SIZE { cx, cy: cx }, SIIGBF(kind | SIIGBF_SCALEUP.0))
+            .GetImage(
+                SIZE { cx, cy: cx },
+                SIIGBF(kind | background | SIIGBF_SCALEUP.0),
+            )
             .ok()?;
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -838,6 +852,19 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].1, vec![1, 3]);
         assert_eq!(groups[1].1, vec![2]);
+    }
+
+    #[test]
+    fn icon_background_is_limited_to_chatgpt_pwa() {
+        assert!(use_icon_background(
+            "shell:AppsFolder\\Chrome._crx_cadlkdcgmdikeeg.UserData.Profile1"
+        ));
+        assert!(!use_icon_background(
+            "shell:AppsFolder\\91750D7E.Slack_8she8kybcnzg4!Slack"
+        ));
+        assert!(!use_icon_background(
+            "shell:AppsFolder\\Chrome._crx_other.UserData.Profile1"
+        ));
     }
 
     #[test]
