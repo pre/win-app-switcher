@@ -121,25 +121,55 @@ pub fn premultiply_bgra(bits: &mut [u8]) {
     }
 }
 
+/// Read one attribute out of a single XML start tag, with or without its
+/// leading `<`.
+///
+/// The tag is walked attribute by attribute instead of searched for `name`:
+/// every value is consumed as part of the scan, so text inside a value
+/// (`Other="foo Id=bar"`) can never be mistaken for the attribute itself, and
+/// a namespaced key (`uap10:HostId`) never matches a bare `Id`. A malformed
+/// attribute is skipped and the scan continues; only an unterminated quote
+/// gives up, because the remainder of the tag is unparseable after it.
 fn xml_attr(tag: &str, name: &str) -> Option<String> {
-    let mut rest = tag;
-    while let Some(pos) = rest.find(name) {
-        let boundary = pos == 0 || rest[..pos].ends_with(char::is_whitespace);
-        rest = &rest[pos + name.len()..];
-        let after = rest.trim_start();
-        if !boundary || !after.starts_with('=') {
+    let rest = tag.strip_prefix('<').unwrap_or(tag);
+    let mut rest = &rest[rest.find(char::is_whitespace)?..];
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() || rest.starts_with('>') || rest.starts_with("/>") {
+            return None;
+        }
+        let key_end = rest
+            .find(|c: char| c.is_whitespace() || c == '=' || c == '>')
+            .unwrap_or(rest.len());
+        let key = &rest[..key_end];
+        if key.is_empty() {
+            // Stray `=` with no key: drop it so the scan keeps advancing.
+            rest = &rest[rest.chars().next()?.len_utf8()..];
             continue;
         }
-        let value = after[1..].trim_start();
-        let quote = value.chars().next()?;
-        if quote != '"' && quote != '\'' {
+        rest = rest[key_end..].trim_start();
+        let Some(after_eq) = rest.strip_prefix('=') else {
             continue;
+        };
+        let value = after_eq.trim_start();
+        let (found, next) = match value.chars().next() {
+            Some(quote @ ('"' | '\'')) => {
+                let body = &value[quote.len_utf8()..];
+                let end = body.find(quote)?;
+                (&body[..end], &body[end + quote.len_utf8()..])
+            }
+            _ => {
+                let end = value
+                    .find(|c: char| c.is_whitespace() || c == '>')
+                    .unwrap_or(value.len());
+                (&value[..end], &value[end..])
+            }
+        };
+        if key == name {
+            return Some(found.to_string());
         }
-        let value = &value[quote.len_utf8()..];
-        let end = value.find(quote)?;
-        return Some(value[..end].to_string());
+        rest = next;
     }
-    None
 }
 
 fn use_direct_package_logo(aumid: &str) -> bool {
@@ -929,6 +959,47 @@ mod tests {
         assert!(use_direct_package_logo("Claude_pzs8sxrjxfjjc!Claude"));
         assert!(!use_direct_package_logo("91750D7E.Slack_8she8kybcnzg4!Slack"));
         assert!(!use_direct_package_logo("MSTeams_8wekyb3d8bbwe!MSTeams"));
+    }
+
+    #[test]
+    fn xml_attr_ignores_name_inside_an_attribute_value() {
+        // "Id=bar" sits inside another attribute's value, preceded by a space:
+        // only the real Id attribute may match.
+        let tag = r#"<Application Other="foo Id=bar" Id="real">"#;
+        assert_eq!(xml_attr(tag, "Id").as_deref(), Some("real"));
+        assert_eq!(xml_attr(r#"<Application Other="foo Id=bar">"#, "Id"), None);
+    }
+
+    #[test]
+    fn xml_attr_requires_a_whole_key_match() {
+        let tag = r#"<Application uap10:HostId="Hosted" Id="Claude">"#;
+        assert_eq!(xml_attr(tag, "Id").as_deref(), Some("Claude"));
+        assert_eq!(xml_attr(tag, "HostId"), None);
+        assert_eq!(xml_attr(tag, "uap10:HostId").as_deref(), Some("Hosted"));
+    }
+
+    #[test]
+    fn xml_attr_continues_past_malformed_attributes() {
+        // Unquoted value, valueless attribute and a stray '=' each skip ahead
+        // rather than abandoning the scan.
+        let tag = r#"<Application Broken=bar Flag Other = = Id="Claude">"#;
+        assert_eq!(xml_attr(tag, "Id").as_deref(), Some("Claude"));
+        assert_eq!(xml_attr(tag, "Broken").as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn xml_attr_handles_quoting_and_tag_shapes() {
+        // Single quotes, a self-closing tag and a leading '<' that the
+        // VisualElements caller strips off before slicing.
+        let tag = r"uap:VisualElements Square150x150Logo='Assets\Claude.png' />";
+        assert_eq!(
+            xml_attr(tag, "Square150x150Logo").as_deref(),
+            Some(r"Assets\Claude.png")
+        );
+        // An unterminated quote leaves nothing parseable behind it.
+        assert_eq!(xml_attr(r#"<Application Id="Claude>"#, "Id"), None);
+        // A tag with no attributes at all.
+        assert_eq!(xml_attr("<Applications>", "Id"), None);
     }
 
     #[test]
