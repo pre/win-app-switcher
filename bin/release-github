@@ -50,6 +50,22 @@ elif [[ ! "$VERSION" =~ ^v[0-9] ]]; then
   exit 2
 fi
 
+if [[ "$DRY_RUN" != "--dry-run" ]]; then
+  command -v gh >/dev/null || { echo "gh CLI is required" >&2; exit 1; }
+
+  DRAFT_URL="$(gh api "repos/$REPO/releases" --paginate \
+    --jq ".[] | select(.draft and .tag_name == \"$VERSION\") | .html_url")"
+  if [[ -n "$DRAFT_URL" ]]; then
+    echo "draft release $VERSION already exists: $DRAFT_URL" >&2
+    exit 1
+  fi
+
+  if [[ -n "$(git ls-remote --tags origin "refs/tags/$VERSION")" ]]; then
+    echo "release $VERSION already exists on origin" >&2
+    exit 1
+  fi
+fi
+
 HEAD_SHA="$(git rev-parse HEAD)"
 RANGE="${PREV_TAG:+$PREV_TAG..}HEAD"
 SUBJECTS="$(git log --no-merges --pretty='%s' "$RANGE")"
@@ -75,15 +91,9 @@ if [[ "$DRY_RUN" == "--dry-run" ]]; then
   exit 0
 fi
 
-command -v gh >/dev/null || { echo "gh CLI is required" >&2; exit 1; }
-
-# The draft is pinned to HEAD, so HEAD must exist on origin and the tag be free.
+# The draft is pinned to HEAD, so HEAD must exist on origin.
 if ! git merge-base --is-ancestor "$HEAD_SHA" origin/main; then
   echo "HEAD ($HEAD_SHA) is not on origin/main; push first." >&2
-  exit 1
-fi
-if [[ -n "$(git ls-remote --tags origin "refs/tags/$VERSION")" ]]; then
-  echo "tag $VERSION already exists on origin" >&2
   exit 1
 fi
 
