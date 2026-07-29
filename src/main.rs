@@ -761,8 +761,7 @@ mod win {
         copy_wstr(&mut nid.szInfoTitle, &format!("Update available: {tag}"));
         copy_wstr(
             &mut nid.szInfo,
-            "Click to open the release page. Set notify_updates = false in \
-             config.toml to disable this notification.",
+            "Click to open the release page.",
         );
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
