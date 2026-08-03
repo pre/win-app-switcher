@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 
 # Windows-only dependency so `cargo test` runs the pure-logic tests on any host.
 [target.'cfg(windows)'.dependencies.windows]
