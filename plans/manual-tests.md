@@ -221,24 +221,27 @@ identities, so these checks are the only thing that establishes them.
 8. Slack, Teams, Settings and Calculator look exactly as they do today:
    unplated, correctly sized, no corner rounding, no swap to a package
    asset. A debug build logs no `out-sharpens` line for any of them.
+9. Windows Terminal: the dark chevron mark is drawn on its own, with no
+   plate-colored frame around it. Its artwork is grayscale but shaded, not
+   a flat silhouette, so the plate must not apply.
 
 ### Unelevated degradation
-9. Start the exe normally (no admin): a tray balloon warns once about
-   running without administrator rights; switching still works.
-10. Focus an elevated window (admin terminal): WIN+TAB does nothing while
+10. Start the exe normally (no admin): a tray balloon warns once about
+    running without administrator rights; switching still works.
+11. Focus an elevated window (admin terminal): WIN+TAB does nothing while
     it has focus — expected — and works again when focus moves elsewhere.
-11. Start elevated: no balloon.
+12. Start elevated: no balloon.
 
 ### Task Scheduler autostart
-12. The README `schtasks` recipe: after logging out and in, the switcher is
+13. The README `schtasks` recipe: after logging out and in, the switcher is
     running elevated (Task Manager shows "elevated: yes") with no UAC prompt
     and no balloon.
 
 ### Per-monitor DPI
-13. On a display scaled >100% (e.g. 150%), both dialogs are sharp — text
+14. On a display scaled >100% (e.g. 150%), both dialogs are sharp — text
     and icons show no bitmap-stretch blur — and visually the same size as
     on a 100% display.
-14. Mixed-DPI monitors, `dialog_monitor = "mouse"`: the dialog opens
+15. Mixed-DPI monitors, `dialog_monitor = "mouse"`: the dialog opens
     correctly sized and centered on whichever monitor the mouse is on,
     both ways; mouse hover still tracks the icons/rows accurately.
 

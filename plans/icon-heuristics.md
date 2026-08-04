@@ -59,8 +59,15 @@ safe.
 The signal is "this mark is a transparent monochrome glyph that needs the
 taskbar's white plate". Load the icon plain first, then decide from the
 pixels: the icon has a genuine transparent area, and its opaque ink is
-near-neutral (low chroma) and dark. If so, reload it with
-`SIIGBF_ICONBACKGROUND`.
+near-neutral (low chroma), dark, and drawn in a single flat tone. If so,
+reload it with `SIIGBF_ICONBACKGROUND`.
+
+Flatness is what separates a silhouette from an illustration that merely
+happens to be grayscale. Chroma and luma alone accept both, so Windows
+Terminal's shaded dark chevron scored as plate-worthy and came back
+wrapped in a plate-colored frame. A silhouette is one ink, so its opaque
+pixels' luma standard deviation sits near 0; Terminal's is ~54 and
+ChatGPT's is 0. The cut is at 24.
 
 Scoped to `shell:AppsFolder\` sources, where that flag is meaningful.
 That is a category of source, not a machine-specific value.
@@ -117,10 +124,10 @@ Tests
   `icon_background_is_limited_to_chatgpt_pwa`,
   `direct_package_logo_is_limited_to_known_blurry_apps`).
 - Add tests for the four new predicates: a blurred edge scores below a
-  sharp one and a near-tie keeps the primary; a dark monochrome mark with
-  transparency wants a plate while a colorful or fully-opaque icon does
-  not; full-bleed detection accepts an opaque border and rejects one with
-  a transparent margin.
+  sharp one and a near-tie keeps the primary; a flat dark monochrome mark
+  with transparency wants a plate while a colorful, fully-opaque or shaded
+  grayscale icon does not; full-bleed detection accepts an opaque border
+  and rejects one with a transparent margin.
 - Keep the `xml_attr` tests from 7ff51cb and
   `rounded_background_mask_clears_only_corner_pixels`; none of them touch
   the removed predicates.

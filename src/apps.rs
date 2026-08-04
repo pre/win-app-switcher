@@ -246,10 +246,23 @@ pub fn prefers_alternate_icon(primary: &[u8], alternate: &[u8], px: u32) -> bool
     base > 0.0 && sharpness(alternate, px) > base * ALTERNATE_SHARPNESS_MARGIN
 }
 
+/// How much the ink tone of a silhouette may vary before the mark counts as a
+/// shaded illustration rather than a flat glyph. A silhouette is drawn in one
+/// ink, so its opaque pixels land on a single luma and spread near 0; a
+/// grayscale illustration spends the range on shading and lands above 50.
+const PLATE_MAX_INK_SPREAD: f32 = 24.0;
+
 /// Whether an icon is a transparent monochrome glyph that needs the taskbar's
 /// white plate behind it: it has a genuine transparent area, and its opaque
-/// ink is near-neutral and dark. A colorful mark, or one that already fills
-/// its square, is left alone.
+/// ink is near-neutral, dark, and drawn in a single flat tone. A colorful
+/// mark, one that already fills its square, or a shaded grayscale
+/// illustration is left alone.
+///
+/// The flatness check is what separates the two kinds of gray mark. Chroma and
+/// luma alone accept any dark near-neutral icon, which sweeps up illustrations
+/// that merely happen to be drawn in grayscale — Windows Terminal's icon is a
+/// shaded prompt on a dark chevron, and plating it wraps it in a plate-colored
+/// frame it was never designed to sit on. A silhouette has no shading to lose.
 pub fn wants_icon_plate(bits: &[u8]) -> bool {
     const CLEAR: u8 = 32;
     const OPAQUE: u8 = 200;
@@ -258,7 +271,7 @@ pub fn wants_icon_plate(bits: &[u8]) -> bool {
         return false;
     }
     let (mut clear, mut ink) = (0usize, 0usize);
-    let (mut chroma, mut luma) = (0.0f32, 0.0f32);
+    let (mut chroma, mut luma, mut luma_sq) = (0.0f32, 0.0f32, 0.0f32);
     for p in bits.chunks_exact(4) {
         if p[3] < CLEAR {
             clear += 1;
@@ -271,14 +284,19 @@ pub fn wants_icon_plate(bits: &[u8]) -> bool {
         // within a percent and the channels can be read as color directly.
         let (b, g, r) = (f32::from(p[0]), f32::from(p[1]), f32::from(p[2]));
         chroma += b.max(g).max(r) - b.min(g).min(r);
-        luma += premul_luma(p);
+        let l = premul_luma(p);
+        luma += l;
+        luma_sq += l * l;
         ink += 1;
     }
     // Enough ink to judge, and enough clear space that a plate would show.
     if ink * 100 < total || clear * 10 < total {
         return false;
     }
-    chroma / ink as f32 <= 32.0 && luma / ink as f32 <= 100.0
+    let ink = ink as f32;
+    let mean_luma = luma / ink;
+    let spread = (luma_sq / ink - mean_luma * mean_luma).max(0.0).sqrt();
+    chroma / ink <= 32.0 && mean_luma <= 100.0 && spread <= PLATE_MAX_INK_SPREAD
 }
 
 /// Whether an image is a full-bleed square: its whole border ring is opaque,
@@ -1171,6 +1189,17 @@ mod tests {
         assert!(!wants_icon_plate(&colorful));
         // No transparent area at all: a plate would never show.
         assert!(!wants_icon_plate(&vec![10u8; (PX * PX * 4) as usize]));
+        // Same dark neutral disc, shaded rather than flat: an illustration
+        // that happens to be grayscale, which the plate would frame.
+        let shaded = image(PX, |x, y| {
+            let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
+            if d > PX as f32 / 3.0 {
+                return (0, 0, 0, 0);
+            }
+            let ink = (20.0 + 160.0 * (y as f32 / PX as f32)).round() as u8;
+            (ink, ink, ink, 255)
+        });
+        assert!(!wants_icon_plate(&shaded));
     }
 
     #[test]
