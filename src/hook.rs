@@ -54,14 +54,18 @@ pub enum Event {
     CloseApp,
     /// W pressed in win mode: close only the selected window.
     CloseWindow,
+    /// § pressed in app mode: switch over to the selected app's window list.
+    WinList,
 }
 
 impl Event {
     pub fn from_wparam(w: usize) -> Option<Event> {
         use Event::*;
-        [AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp, CloseWindow]
-            .into_iter()
-            .find(|e| *e as usize == w)
+        [
+            AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp, CloseWindow, WinList,
+        ]
+        .into_iter()
+        .find(|e| *e as usize == w)
     }
 }
 
@@ -143,11 +147,15 @@ pub fn step(s: &mut State, key: Key, up: bool, shift: bool) -> Actions {
         }
         (Key::Section, false) if s.win_down => {
             let inject_dummy = s.mode == Mode::None;
-            if s.mode == Mode::None {
-                s.mode = Mode::Win;
-            }
-            let event = (s.mode == Mode::Win)
-                .then(|| if shift { Event::WinPrev } else { Event::WinNext });
+            // Mid WIN+TAB session § switches over to the selected app's
+            // window list (app session discarded); SHIFT is ignored for the
+            // conversion press — it opens the list, it doesn't cycle.
+            let event = Some(match s.mode {
+                Mode::App => Event::WinList,
+                _ if shift => Event::WinPrev,
+                _ => Event::WinNext,
+            });
+            s.mode = Mode::Win;
             Actions {
                 swallow: true,
                 event,
@@ -417,6 +425,32 @@ mod tests {
     }
 
     #[test]
+    fn section_in_app_session_switches_to_window_list() {
+        let mut s = IDLE;
+        step(&mut s, Key::Win, false, false);
+        step(&mut s, Key::Tab, false, false);
+        // § mid app session: switch over to the selected app's window list.
+        let a = step(&mut s, Key::Section, false, false);
+        assert!(a.swallow);
+        assert_eq!(a.event, Some(Event::WinList));
+        assert!(!a.inject_dummy, "dummy key already injected by this session");
+        assert_eq!(s.mode, Mode::Win);
+        // SHIFT+§ converts the same way: it opens the list, it doesn't cycle.
+        let mut s2 = IDLE;
+        step(&mut s2, Key::Win, false, false);
+        step(&mut s2, Key::Tab, false, false);
+        assert_eq!(step(&mut s2, Key::Section, false, true).event, Some(Event::WinList));
+        // Further presses cycle the list as a normal win session.
+        assert_eq!(step(&mut s, Key::Section, false, false).event, Some(Event::WinNext));
+        assert_eq!(step(&mut s, Key::Section, false, true).event, Some(Event::WinPrev));
+        assert_eq!(step(&mut s, Key::W, false, false).event, Some(Event::CloseWindow));
+        step(&mut s, Key::W, true, false);
+        let a = step(&mut s, Key::Win, true, false);
+        assert_eq!(a.event, Some(Event::Commit));
+        assert_eq!(s.mode, Mode::None);
+    }
+
+    #[test]
     fn arrows_move_selection_only_in_app_mode() {
         let mut s = IDLE;
         step(&mut s, Key::Win, false, false);
@@ -594,7 +628,7 @@ mod tests {
     fn event_wparam_roundtrip() {
         use Event::*;
         for ev in [
-            AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp, CloseWindow,
+            AppNext, AppPrev, WinNext, WinPrev, Commit, Cancel, CloseApp, CloseWindow, WinList,
         ] {
             assert_eq!(Event::from_wparam(ev as usize), Some(ev));
         }

@@ -626,6 +626,54 @@ mod win {
                     }
                 }
             }
+            // § mid WIN+TAB session: switch over to the selected app's
+            // window list without releasing WIN.
+            WinList => {
+                if let Some(Session::App { groups, kb }) = slot {
+                    let open = crate::ui::is_open();
+                    // The mouse may have picked an icon in the row.
+                    let sel =
+                        if open { crate::ui::selection() } else { *kb }.min(groups.len() - 1);
+                    let key = groups[sel].key.clone();
+                    let windows = crate::apps::app_windows(
+                        &key,
+                        cfg.restore_minimized,
+                        cfg.desktop_filter == DesktopFilter::All,
+                    );
+                    // Nothing to list (all windows minimized, restore off):
+                    // keep the app session. The hook's mode is now Win — the
+                    // same tolerated mismatch as declining a WIN+§ session.
+                    if windows.is_empty() {
+                        return;
+                    }
+                    #[cfg(debug_assertions)]
+                    println!(
+                        "win session from app switcher: {} candidates ({})",
+                        windows.len(),
+                        crate::apps::app_name(&key)
+                    );
+                    unsafe {
+                        let _ = KillTimer(Some(main_hwnd), TIMER_APPROW);
+                    }
+                    if open {
+                        // The row is on screen: replace it with the list
+                        // right away (the dialog refreshes in place). Not
+                        // show_window_list — SESSION is already borrowed.
+                        let name = crate::apps::app_name(&key);
+                        let icon = crate::apps::icon_source(&key);
+                        let titles: Vec<String> =
+                            windows.iter().map(|&w| crate::apps::window_title(w)).collect();
+                        crate::ui::show_list(main_hwnd, &name, &icon, &titles, 0, &cfg);
+                    } else {
+                        // Still inside dialog_delay_ms: keep quick-tap
+                        // semantics, a fresh delay for the fresh session.
+                        unsafe {
+                            SetTimer(Some(main_hwnd), TIMER_WINLIST, cfg.dialog_delay_ms, None);
+                        }
+                    }
+                    *slot = Some(Session::Win { key, windows, index: 0 });
+                }
+            }
         });
     }
 

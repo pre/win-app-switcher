@@ -25,6 +25,7 @@ How it differs from the built-in alt-tab:
 | `WIN+TAB` (held) | Icon row; `TAB` = next, `SHIFT+TAB` = previous |
 | `WIN+§` (tap) | Switch to the next window of the active app, no UI |
 | `WIN+§` (held) | Window list; `§` = next, `SHIFT+§` = previous |
+| `§` (in the icon row) | Window list of the selected application |
 | Arrow keys / mouse hover | Move the selection |
 | Release `WIN` | Activate the selection |
 | Left click | Activate immediately |

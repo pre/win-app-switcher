@@ -60,17 +60,19 @@ Repeat the key tests with the release build to confirm it behaves the same
 6. During a WIN+TAB session, press Q → `CloseApp`; Windows Search does not open.
 7. During a WIN+§ session, press TAB → `AppNext`, no Task View (the session
    switches over to the app switcher).
+8. During a WIN+TAB session, press § → `WinList` (the session switches over
+   to the selected app's window list); § again → `WinNext`.
 
 ### Pass-through unaffected
-8. WIN alone (tap) → Start menu opens normally.
-9. WIN+L locks, WIN+D shows desktop, WIN+E opens Explorer, WIN+R opens Run.
-10. Plain TAB, §, Q, ESC in a text editor behave completely normally.
+9. WIN alone (tap) → Start menu opens normally.
+10. WIN+L locks, WIN+D shows desktop, WIN+E opens Explorer, WIN+R opens Run.
+11. Plain TAB, §, Q, ESC in a text editor behave completely normally.
 
 ### No stuck keys
-11. After a dozen mixed sessions (commit, cancel, quick taps), type in an
+12. After a dozen mixed sessions (commit, cancel, quick taps), type in an
     editor: no phantom modifiers — letters are lowercase, TAB indents, no
     stuck WIN (press E: Explorer must NOT open).
-12. Quit from the tray → WIN+TAB opens Task View again (hook gone with process).
+13. Quit from the tray → WIN+TAB opens Task View again (hook gone with process).
 
 ## M2 — Core switching
 
@@ -178,20 +180,28 @@ Next/Prev event and `activate candidate i/N` on commit.
 6. TAB while the list is open (WIN held) → the list closes and the app
    switcher dialog opens (win session discarded, nothing activated).
    Same works before the delay: WIN+§ quickly followed by TAB.
-7. `dialog_delay_ms = 1000` → the list appears only after one second;
+7. § while the icon row is open (WIN held) → the row is replaced by the
+   window list of the **selected** app (not the foreground app), top row
+   highlighted; § then steps down. Hovering an icon with the mouse first:
+   § lists the hovered app. Before the delay (WIN+TAB quickly followed by
+   §) the list appears after the delay; releasing WIN before that
+   activates the selected app's topmost window. With
+   `restore_minimized = false`, § on an app whose windows are all
+   minimized does nothing (the row stays).
+8. `dialog_delay_ms = 1000` → the list appears only after one second;
    `dialog_delay_ms = 0` → practically immediately.
-8. Single-window app: quick tap leaves focus in place; holding WIN shows a
+9. Single-window app: quick tap leaves focus in place; holding WIN shows a
    one-row list.
-9. Left/Right arrows during the list pass through (WIN+Left snap fires);
-   Up/Down during the app switcher pass through (WIN+Up maximize fires).
+10. Left/Right arrows during the list pass through (WIN+Left snap fires);
+    Up/Down during the app switcher pass through (WIN+Up maximize fires).
 
 ### WIN+W
-10. W while the list is open closes only the highlighted window: its row
+11. W while the list is open closes only the highlighted window: its row
     leaves the list, the list shrinks, the app keeps running and the
     session stays open. W on the last row closes the list.
-11. Holding W down closes only one window (autorepeat is ignored); a
+12. Holding W down closes only one window (autorepeat is ignored); a
     release + fresh press closes the next one.
-12. W in the WIN+TAB app switcher does nothing (and the widgets pane does
+13. W in the WIN+TAB app switcher does nothing (and the widgets pane does
     not open).
 
 ## M5 — Polish

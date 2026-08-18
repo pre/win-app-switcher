@@ -824,11 +824,22 @@ mod win {
         Some(bits)
     }
 
+    /// All eligible windows of `key` in z-order. With `include_minimized`
+    /// off, minimized windows are skipped — without restore-on-activate a
+    /// minimized window cannot visibly take focus.
+    pub fn app_windows(key: &AppKey, include_minimized: bool, all_desktops: bool) -> Vec<HWND> {
+        eligible_windows(all_desktops)
+            .into_iter()
+            .filter(|(w, k)| {
+                k == key && (include_minimized || !unsafe { IsIconic(*w) }.as_bool())
+            })
+            .map(|(w, _)| w)
+            .collect()
+    }
+
     /// The foreground app's grouping key and all its windows in z-order
     /// (foreground first). Keyed by [`AppKey`] so a focused PWA scopes to its
-    /// own windows, not to every Chrome window. With `include_minimized` off,
-    /// minimized windows are skipped — without restore-on-activate a minimized
-    /// window cannot visibly take focus.
+    /// own windows, not to every Chrome window.
     pub fn foreground_app_windows(
         include_minimized: bool,
         all_desktops: bool,
@@ -847,11 +858,7 @@ mod win {
                 }
                 fg = GetParent(fg).unwrap_or_default();
             };
-            let windows = eligible_windows(all_desktops)
-                .into_iter()
-                .filter(|(w, k)| *k == key && (include_minimized || !IsIconic(*w).as_bool()))
-                .map(|(w, _)| w)
-                .collect();
+            let windows = app_windows(&key, include_minimized, all_desktops);
             (Some(key), windows)
         }
     }
