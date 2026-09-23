@@ -258,10 +258,13 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, LoadCursorW, PostMessageW,
         RegisterClassW, SetCursor, SetWindowPos, ShowWindow, UpdateLayeredWindow, IDC_ARROW,
-        SWP_NOACTIVATE,
-        SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEMOVE, WNDCLASSW, WS_EX_LAYERED,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        SHOW_WINDOW_CMD, SIZE_MINIMIZED, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOW,
+        ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SHOWWINDOW, WM_SIZE, WM_USER, WNDCLASSW,
+        WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
+
+    /// Posted by the dialog to itself after the shell hid or minimized it.
+    const WM_REAPPEAR: u32 = WM_USER + 1;
 
     struct Palette {
         bg: D2D1_COLOR_F,
@@ -566,15 +569,21 @@ mod win {
         // no background flash, ever.
         render();
         if let Some(hwnd) = created {
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOW);
-                // Foreground via the attach dance: makes later
-                // SetForegroundWindow on commit trivially allowed, and mouse
-                // capture full-strength.
-                crate::apps::activate(hwnd, false);
-                SetCapture(hwnd);
-            }
+            unsafe { present(hwnd, SW_SHOW) }
         }
+    }
+
+    /// Show the dialog, take the foreground and capture the mouse.
+    unsafe fn present(hwnd: HWND, cmd: SHOW_WINDOW_CMD) {
+        let _ = ShowWindow(hwnd, cmd);
+        // Foreground via the attach dance: makes later SetForegroundWindow on
+        // commit trivially allowed, and mouse capture full-strength.
+        crate::apps::activate(hwnd, false);
+        SetCapture(hwnd);
+    }
+
+    fn is_dialog(hwnd: HWND) -> bool {
+        DLG.with_borrow(|slot| slot.as_ref().is_some_and(|d| d.hwnd == hwnd))
     }
 
     /// Keyboard moved the selection.
@@ -757,6 +766,24 @@ mod win {
                         WPARAM(event as usize),
                         LPARAM(0),
                     );
+                }
+                LRESULT(0)
+            }
+            // WIN+D and WIN+M pass through the hook, so the shell can hide or
+            // minimize the dialog while the session goes on. The dialog comes
+            // back once the shell's pass is over, as a posted message: the
+            // hide is still in progress while these arrive.
+            WM_SHOWWINDOW | WM_SIZE => {
+                let hidden = msg == WM_SHOWWINDOW && wparam.0 == 0;
+                let minimized = msg == WM_SIZE && wparam.0 as u32 == SIZE_MINIMIZED;
+                if (hidden || minimized) && is_dialog(hwnd) {
+                    let _ = PostMessageW(Some(hwnd), WM_REAPPEAR, WPARAM(0), LPARAM(0));
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_REAPPEAR => {
+                if is_dialog(hwnd) {
+                    present(hwnd, SW_RESTORE);
                 }
                 LRESULT(0)
             }

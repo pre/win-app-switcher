@@ -134,6 +134,11 @@ Next/Prev event and `activate candidate i/N` on commit.
 6. The dialog itself never appears as an entry in the icon row.
 7. Icons look correct for Win32 apps; an app without an extractable icon
    shows a dim placeholder square (UWP icons: see M5).
+8. Hold WIN, tap TAB, then tap D (show desktop) and M (minimize all) with
+   WIN still held: the other windows go away, the dialog stays on top with
+   its selection. TAB still advances the highlight; releasing WIN activates
+   the highlighted app. ESC instead closes the dialog and leaves the desktop
+   as it is.
 
 ### Mouse
 8. Hovering an icon moves the highlight to it; releasing WIN then activates
